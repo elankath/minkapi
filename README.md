@@ -1,6 +1,6 @@
-# Kasmim
+# Kasim
 
-Kasmim is the Kubernetes API Server Mimic - lean implementation that can mimic the kubernetes API server. Primarily meant to satisfy the kubernetes API server and the kubernetes Cluster Autoscaler.
+Kasim is the Kubernetes API Server Simulator - lean, in-memory implementation that can mimic core functions of an kubernetes API server and simulate initialization of some core resources such as Nodes, Pods. Primarily meant to offer enough of the surface area of the kubernetes API server  so that the Kube Scheduler and the Kubernetes Cluster Autoscaler can operate their controller loops.
 
 > [!NOTE]
 > This is WIP prototype. DO NOT USE!
