@@ -1,4 +1,4 @@
-module github.com/elankath/kubeasim
+module github.com/elankath/kapisim
 
 go 1.24.0
 
