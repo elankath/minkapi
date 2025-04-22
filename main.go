@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"github.com/elankath/kapisim/internal/core"
+	"github.com/elankath/kapisim/core"
 	"k8s.io/klog/v2"
 	"os"
 	"os/signal"
