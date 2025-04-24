@@ -1,16 +1,77 @@
 package core
 
 import (
+	"errors"
+	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
+	schedulingv1 "k8s.io/api/scheduling/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"maps"
+	"slices"
 )
 
 var (
+	GVRNamespaces = corev1.SchemeGroupVersion.WithResource("namespaces")
+	GVRPods       = corev1.SchemeGroupVersion.WithResource("pods")
+	GVRNodes      = corev1.SchemeGroupVersion.WithResource("nodes")
+
+	GVRPriorityClasses = schedulingv1.SchemeGroupVersion.WithResource("priorityclasses")
+
+	GVRLeases = coordinationv1.SchemeGroupVersion.WithResource("leases")
+
+	GVREvents      = eventsv1.SchemeGroupVersion.WithResource("events")
+	GVRRoles       = rbacv1.SchemeGroupVersion.WithResource("roles")
+	GVRDeployments = appsv1.SchemeGroupVersion.WithResource("deployments")
+
+	GVRReplicaSets = appsv1.SchemeGroupVersion.WithResource("replicasets")
+
+	SupportedGVRs = []schema.GroupVersionResource{GVRNamespaces, GVRPods, GVRNodes, GVRPriorityClasses, GVRLeases, GVREvents, GVRRoles, GVRDeployments, GVRReplicaSets}
+)
+
+var schemeAdders = []func(scheme *runtime.Scheme) error{
+	corev1.AddToScheme,
+	appsv1.AddToScheme,
+	coordinationv1.AddToScheme,
+	eventsv1.AddToScheme,
+	rbacv1.AddToScheme,
+	schedulingv1.AddToScheme,
+}
+
+func RegisterSchemes() (scheme *runtime.Scheme, err error) {
+	scheme = runtime.NewScheme()
+	var errs []error
+	for _, fn := range schemeAdders {
+		err = fn(scheme)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	err = errors.Join(errs...)
+	return
+}
+
+var (
+	apiGroupList        = buildAPIGroupList()
 	coreAPIResourceList = metav1.APIResourceList{
 		TypeMeta: metav1.TypeMeta{
 			Kind: "APIResourceList",
 		},
 		GroupVersion: "v1",
 		APIResources: []metav1.APIResource{
+			{
+				Name:               "namespaces",
+				SingularName:       "namespace",
+				ShortNames:         []string{"ns"},
+				Kind:               "Namespace",
+				Namespaced:         false,
+				Verbs:              []string{"create", "delete", "get", "list", "watch"},
+				StorageVersionHash: "ns111",
+			},
 			{
 				Name:               "pods",
 				SingularName:       "pod",
@@ -22,74 +83,14 @@ var (
 				StorageVersionHash: "pod111",
 			},
 			{
-				Name:               "namespaces",
-				SingularName:       "namespace",
-				ShortNames:         []string{"ns"},
-				Kind:               "Namespace",
+				Name:               "nodes",
+				SingularName:       "node",
+				ShortNames:         []string{"no"},
+				Kind:               "Node",
 				Namespaced:         false,
 				Verbs:              []string{"create", "delete", "get", "list", "watch"},
-				StorageVersionHash: "ns111",
-			},
-		},
-	}
-
-	apiGroupList = &metav1.APIGroupList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIGroupList",
-			APIVersion: "v1",
-		},
-		Groups: []metav1.APIGroup{
-			{
-				Name: "apps",
-				Versions: []metav1.GroupVersionForDiscovery{
-					{
-						GroupVersion: "apps/v1",
-						Version:      "v1",
-					},
-				},
-				PreferredVersion: metav1.GroupVersionForDiscovery{
-					GroupVersion: "apps/v1",
-					Version:      "v1",
-				},
-			},
-			{
-				Name: "coordination.k8s.io",
-				Versions: []metav1.GroupVersionForDiscovery{
-					{
-						GroupVersion: "coordination.k8s.io/v1",
-						Version:      "v1",
-					},
-				},
-				PreferredVersion: metav1.GroupVersionForDiscovery{
-					GroupVersion: "coordination.k8s.io/v1",
-					Version:      "v1",
-				},
-			},
-			{
-				Name: "events.k8s.io",
-				Versions: []metav1.GroupVersionForDiscovery{
-					{
-						GroupVersion: "events.k8s.io/v1",
-						Version:      "v1",
-					},
-				},
-				PreferredVersion: metav1.GroupVersionForDiscovery{
-					GroupVersion: "events.k8s.io/v1",
-					Version:      "v1",
-				},
-			},
-			{
-				Name: "rbac.authorization.k8s.io",
-				Versions: []metav1.GroupVersionForDiscovery{
-					{
-						GroupVersion: "rbac.authorization.k8s.io/v1",
-						Version:      "v1",
-					},
-				},
-				PreferredVersion: metav1.GroupVersionForDiscovery{
-					GroupVersion: "rbac.authorization.k8s.io/v1",
-					Version:      "v1",
-				},
+				Categories:         []string{"all"},
+				StorageVersionHash: "node111",
 			},
 		},
 	}
@@ -102,7 +103,7 @@ var (
 		ServerAddressByClientCIDRs: []metav1.ServerAddressByClientCIDR{
 			{
 				ClientCIDR:    "0.0.0.0/0",
-				ServerAddress: "10.53.208.76:8080",
+				ServerAddress: "127.0.0.1:8080",
 			},
 		},
 	}
@@ -111,7 +112,7 @@ var (
 			Kind:       "APIResourceList",
 			APIVersion: "v1",
 		},
-		GroupVersion: "apps/v1",
+		GroupVersion: appsv1.SchemeGroupVersion.String(),
 		APIResources: []metav1.APIResource{
 			{
 				Name:       "deployments",
@@ -135,7 +136,7 @@ var (
 			Kind:       "APIResourceList",
 			APIVersion: "v1",
 		},
-		GroupVersion: "events.k8s.io/v1",
+		GroupVersion: eventsv1.SchemeGroupVersion.String(),
 		APIResources: []metav1.APIResource{
 			{
 				Name:       "events",
@@ -147,3 +148,31 @@ var (
 		},
 	}
 )
+
+func buildAPIGroupList() metav1.APIGroupList {
+	var groups = make(map[string]metav1.APIGroup)
+	for _, gvr := range SupportedGVRs {
+		if gvr.Group == "" {
+			//  don't add default group otherwise kubectl will  give errors like the below
+			// error: /, Kind=Pod matches multiple kinds [/v1, Kind=Pod /v1, Kind=Pod]
+			// OH-MY-GAWD, it took me FOREVER to find this.
+			continue
+		}
+		groups[gvr.Group] = metav1.APIGroup{
+			Name: gvr.Group,
+			Versions: []metav1.GroupVersionForDiscovery{
+				{
+					GroupVersion: gvr.GroupVersion().String(),
+					Version:      gvr.Version,
+				},
+			},
+		}
+	}
+	return metav1.APIGroupList{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "APIGroupList",
+			APIVersion: "v1",
+		},
+		Groups: slices.Collect(maps.Values(groups)),
+	}
+}
