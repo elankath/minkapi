@@ -1,6 +1,7 @@
 apiVersion: v1
 kind: Node
 metadata:
+  generateName: no-a-
   labels:
     beta.kubernetes.io/arch: amd64
     beta.kubernetes.io/instance-type: m5.large
@@ -23,7 +24,6 @@ metadata:
     worker.gardener.cloud/kubernetes-version: 1.30.11
     worker.gardener.cloud/pool: a
     worker.gardener.cloud/system-components: "true"
-  name: node-a
 spec:
   providerID: aws:///eu-west-1a/i-nodeaxxxxxxxxxxxx
 status:

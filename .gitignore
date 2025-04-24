@@ -24,3 +24,6 @@ go.work.sum
 .idea
 gen
 kubeconfigs
+
+# ignore scratch folder
+scratch

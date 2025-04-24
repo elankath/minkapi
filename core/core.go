@@ -107,59 +107,51 @@ func (s *KAPISimulator) registerRoutes() {
 
 	// Core v1: Namespaces
 	s.mux.HandleFunc("POST /api/v1/namespaces", s.handleCreate(GVRNamespaces, func() runtime.Object { return &corev1.Namespace{} }))
+	s.mux.HandleFunc("GET /api/v1/namespaces", s.handleListOrWatch(GVRNamespaces, func() runtime.Object { return &corev1.NamespaceList{} }))
 	s.mux.HandleFunc("GET /api/v1/namespaces/{name}", s.handleGet(GVRNamespaces))
-	s.mux.HandleFunc("GET /api/v1/namespaces", s.handleList(GVRNamespaces, func() runtime.Object { return &corev1.NamespaceList{} }))
 	s.mux.HandleFunc("DELETE /api/v1/namespaces/{name}", s.handleDelete(GVRNamespaces))
-	s.mux.HandleFunc("GET /api/v1/namespaces/watch", s.handleWatch(GVRNamespaces))
 
 	// Core v1: Nodes
 	s.mux.HandleFunc("POST /api/v1/nodes", s.handleCreate(GVRNodes, func() runtime.Object { return &corev1.Node{} }))
-	s.mux.HandleFunc("GET /api/v1/nodes/{name}", s.handleGet(GVRNodes))
-	s.mux.HandleFunc("GET /api/v1/nodes", s.handleList(GVRNodes, func() runtime.Object { return &corev1.NodeList{} }))
+	s.mux.HandleFunc("GET /api/v1/nodes", s.handleListOrWatch(GVRNodes, func() runtime.Object { return &corev1.NodeList{} }))
 	s.mux.HandleFunc("DELETE /api/v1/nodes/{name}", s.handleDelete(GVRNodes))
-	s.mux.HandleFunc("GET /api/v1/nodes/watch", s.handleWatch(GVRNodes))
+	s.mux.HandleFunc("GET /api/v1/nodes/{name}", s.handleGet(GVRNodes))
 
 	// Core v1: Pods
 	s.mux.HandleFunc("POST /api/v1/namespaces/{namespace}/pods", s.handleCreate(GVRPods, func() runtime.Object { return &corev1.Pod{} }))
+	s.mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods", s.handleListOrWatch(GVRPods, func() runtime.Object { return &corev1.PodList{} }))
 	s.mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods/{name}", s.handleGet(GVRPods))
-	s.mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods", s.handleList(GVRPods, func() runtime.Object { return &corev1.PodList{} }))
 	s.mux.HandleFunc("DELETE /api/v1/namespaces/{namespace}/pods/{name}", s.handleDelete(GVRPods))
-	s.mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods/watch", s.handleWatch(GVRPods))
 
 	// Scheduling v1: PriorityClasses
-	// apis/scheduling.k8s.io/v1/namespaces/default/priorityclasses
 	s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleCreate(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClass{} }))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleListOrWatch(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClassList{} }))
 	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleGet(GVRPriorityClasses))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleList(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClassList{} }))
 	s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleDelete(GVRPriorityClasses))
 
 	// Apps v1: Deployments
 	s.mux.HandleFunc("POST /apis/apps/v1/namespaces/{namespace}/deployments", s.handleCreate(GVRDeployments, func() runtime.Object { return &appsv1.Deployment{} }))
 	s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleGet(GVRDeployments))
-	s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments", s.handleList(GVRDeployments, func() runtime.Object { return &appsv1.DeploymentList{} }))
+	s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments", s.handleListOrWatch(GVRDeployments, func() runtime.Object { return &appsv1.DeploymentList{} }))
 	s.mux.HandleFunc("DELETE /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleDelete(GVRDeployments))
-	s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments/watch", s.handleWatch(GVRDeployments))
 
 	// Coordination v1: Leases
 	s.mux.HandleFunc("POST /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleCreate(GVRLeases, func() runtime.Object { return &coordinationv1.Lease{} }))
 	s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleGet(GVRLeases))
-	s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleList(GVRLeases, func() runtime.Object { return &coordinationv1.LeaseList{} }))
+	s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleListOrWatch(GVRLeases, func() runtime.Object { return &coordinationv1.LeaseList{} }))
 	s.mux.HandleFunc("DELETE /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleDelete(GVRLeases))
-	s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/watch", s.handleWatch(GVRLeases))
 
 	// Events v1: Events
 	s.mux.HandleFunc("POST /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleCreate(GVREvents, func() runtime.Object { return &eventsv1.Event{} }))
 	s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleGet(GVREvents))
-	s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleList(GVREvents, func() runtime.Object { return &eventsv1.EventList{} }))
+	s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleListOrWatch(GVREvents, func() runtime.Object { return &eventsv1.EventList{} }))
 	s.mux.HandleFunc("DELETE /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleDelete(GVREvents))
-	s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events/watch", s.handleWatch(GVREvents))
 
 	// RBAC v1: Roles
 	s.mux.HandleFunc("POST /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleCreate(GVRRoles, func() runtime.Object { return &rbacv1.Role{} }))
 	s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleGet(GVRRoles))
-	s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleList(GVRRoles, func() runtime.Object { return &rbacv1.RoleList{} }))
+	s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleListOrWatch(GVRRoles, func() runtime.Object { return &rbacv1.RoleList{} }))
 	s.mux.HandleFunc("DELETE /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleDelete(GVRRoles))
-	s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/watch", s.handleWatch(GVRRoles))
 }
 
 // handleAPIGroups returns the list of supported API groups
@@ -338,11 +330,17 @@ func (s *KAPISimulator) handleGet(gvr schema.GroupVersionResource) http.HandlerF
 		name := r.PathValue("name")
 		key := namespace + "/" + name
 
-		if obj, exists, err := store.Get(key); err == nil && exists {
-			writeJsonResponse(r, w, obj)
+		obj, exists, err := store.GetByKey(key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		http.Error(w, "Not Found", http.StatusNotFound)
+		if !exists {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+
+		}
+		writeJsonResponse(r, w, obj)
 	}
 }
 
@@ -399,6 +397,19 @@ func (s *KAPISimulator) handleDelete(gvr schema.GroupVersionResource) http.Handl
 	}
 }
 
+func (s *KAPISimulator) handleListOrWatch(gvr schema.GroupVersionResource, newListFn func() runtime.Object) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		isWatch := query.Get("watch")
+		var delegate http.HandlerFunc
+		if isWatch == "true" {
+			delegate = s.handleWatch(gvr)
+		} else {
+			delegate = s.handleList(gvr, newListFn)
+		}
+		delegate.ServeHTTP(w, r)
+	}
+}
 func (s *KAPISimulator) handleList(gvr schema.GroupVersionResource, newListFn func() runtime.Object) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStore(gvr)
@@ -409,74 +420,96 @@ func (s *KAPISimulator) handleList(gvr schema.GroupVersionResource, newListFn fu
 
 		namespace := getNamespace(r)
 		items := store.List()
-		list := newListFn()
 		currentVersion := s.nextResourceVersion(gvr)
 
-		switch list := list.(type) {
-		case *corev1.PodList:
-			list.TypeMeta = metav1.TypeMeta{Kind: "PodList", APIVersion: GVRPods.GroupVersion().String()}
-			list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-			list.Items = make([]corev1.Pod, 0, len(items))
-			for _, item := range items {
-				pod := item.(*corev1.Pod)
-				if pod.Namespace == namespace {
-					list.Items = append(list.Items, *pod)
-				}
-				pod.Status.Phase = corev1.PodPending
-			}
-		case *appsv1.DeploymentList:
-			list.TypeMeta = metav1.TypeMeta{Kind: "DeploymentList", APIVersion: GVRDeployments.GroupVersion().String()}
-			list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-			list.Items = make([]appsv1.Deployment, 0, len(items))
-			for _, item := range items {
-				deploy := item.(*appsv1.Deployment)
-				if deploy.Namespace == namespace {
-					list.Items = append(list.Items, *deploy)
-				}
-			}
-		case *coordinationv1.LeaseList:
-			list.TypeMeta = metav1.TypeMeta{Kind: "LeaseList", APIVersion: GVRLeases.GroupVersion().String()}
-			list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-			list.Items = make([]coordinationv1.Lease, 0, len(items))
-			for _, item := range items {
-				lease := item.(*coordinationv1.Lease)
-				if lease.Namespace == namespace {
-					list.Items = append(list.Items, *lease)
-				}
-			}
-		case *eventsv1.EventList:
-			list.TypeMeta = metav1.TypeMeta{Kind: "EventList", APIVersion: GVREvents.GroupVersion().String()}
-			list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-			list.Items = make([]eventsv1.Event, 0, len(items))
-			for _, item := range items {
-				event := item.(*eventsv1.Event)
-				if event.Namespace == namespace {
-					list.Items = append(list.Items, *event)
-				}
-			}
-		case *rbacv1.RoleList:
-			list.TypeMeta = metav1.TypeMeta{Kind: "RoleList", APIVersion: GVRRoles.GroupVersion().String()}
-			list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
-			list.Items = make([]rbacv1.Role, 0, len(items))
-			for _, item := range items {
-				role := item.(*rbacv1.Role)
-				if role.Namespace == namespace {
-					list.Items = append(list.Items, *role)
-				}
-			}
-		case *schedulingv1.PriorityClassList:
-			list.TypeMeta = metav1.TypeMeta{Kind: "PriorityClassList", APIVersion: GVRPriorityClasses.GroupVersion().String()}
-			list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
-			list.Items = make([]schedulingv1.PriorityClass, 0, len(items))
-			for _, item := range items {
-				pc := item.(*schedulingv1.PriorityClass)
-				if pc.Namespace == namespace {
-					list.Items = append(list.Items, *pc)
-				}
-			}
-		}
+		list := createList(currentVersion, items, namespace, newListFn)
 		writeJsonResponse(r, w, list)
 	}
+}
+
+func createList(currentVersion string, items []any, namespace string, newListFn func() runtime.Object) runtime.Object {
+	list := newListFn()
+	switch list := list.(type) {
+	case *corev1.PodList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "PodList", APIVersion: GVRPods.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
+		list.Items = make([]corev1.Pod, 0, len(items))
+		for _, item := range items {
+			pod := item.(*corev1.Pod)
+			if pod.Namespace == namespace {
+				list.Items = append(list.Items, *pod)
+			}
+			pod.Status.Phase = corev1.PodPending
+		}
+	case *corev1.NamespaceList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "NamespaceList", APIVersion: GVRNamespaces.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
+		list.Items = make([]corev1.Namespace, 0, len(items))
+		for _, item := range items {
+			ns := item.(*corev1.Namespace)
+			list.Items = append(list.Items, *ns)
+		}
+	case *corev1.NodeList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "NodeList", APIVersion: GVRNodes.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
+		list.Items = make([]corev1.Node, 0, len(items))
+		for _, item := range items {
+			node := item.(*corev1.Node)
+			list.Items = append(list.Items, *node)
+			node.Status.Phase = corev1.NodeRunning
+		}
+	case *appsv1.DeploymentList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "DeploymentList", APIVersion: GVRDeployments.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
+		list.Items = make([]appsv1.Deployment, 0, len(items))
+		for _, item := range items {
+			deploy := item.(*appsv1.Deployment)
+			if deploy.Namespace == namespace {
+				list.Items = append(list.Items, *deploy)
+			}
+		}
+	case *coordinationv1.LeaseList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "LeaseList", APIVersion: GVRLeases.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
+		list.Items = make([]coordinationv1.Lease, 0, len(items))
+		for _, item := range items {
+			lease := item.(*coordinationv1.Lease)
+			if lease.Namespace == namespace {
+				list.Items = append(list.Items, *lease)
+			}
+		}
+	case *eventsv1.EventList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "EventList", APIVersion: GVREvents.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
+		list.Items = make([]eventsv1.Event, 0, len(items))
+		for _, item := range items {
+			event := item.(*eventsv1.Event)
+			if event.Namespace == namespace {
+				list.Items = append(list.Items, *event)
+			}
+		}
+	case *rbacv1.RoleList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "RoleList", APIVersion: GVRRoles.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
+		list.Items = make([]rbacv1.Role, 0, len(items))
+		for _, item := range items {
+			role := item.(*rbacv1.Role)
+			if role.Namespace == namespace {
+				list.Items = append(list.Items, *role)
+			}
+		}
+	case *schedulingv1.PriorityClassList:
+		list.TypeMeta = metav1.TypeMeta{Kind: "PriorityClassList", APIVersion: GVRPriorityClasses.GroupVersion().String()}
+		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
+		list.Items = make([]schedulingv1.PriorityClass, 0, len(items))
+		for _, item := range items {
+			pc := item.(*schedulingv1.PriorityClass)
+			if pc.Namespace == namespace {
+				list.Items = append(list.Items, *pc)
+			}
+		}
+	}
+	return list
 }
 
 func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.HandlerFunc {
@@ -507,17 +540,8 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 			return
 		}
 
-		s.watchLock.Lock()
-		if _, ok := s.watchers[gvr]; !ok {
-			s.watchers[gvr] = make(map[string]chan watch.Event)
-		}
-		ch := make(chan watch.Event, 10)
-		s.watchers[gvr][namespace] = ch
-		s.watchLock.Unlock()
-
-		s.storeLock.Lock()
-		currentVersion := s.versions[gvr]
-		s.storeLock.Unlock()
+		ch := s.createWatchChan(gvr, namespace)
+		currentVersion := s.getCurrentVersion(gvr)
 
 		if resourceVersion == "" || startVersion < currentVersion {
 			items := store.List()
@@ -538,6 +562,7 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 							s.watchLock.Unlock()
 							return
 						}
+						//_, _ = fmt.Fprintln(w)
 						flusher.Flush()
 					}
 				}
@@ -574,6 +599,24 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 			}
 		}
 	}
+}
+
+func (s *KAPISimulator) getCurrentVersion(gvr schema.GroupVersionResource) int64 {
+	s.storeLock.Lock()
+	currentVersion := s.versions[gvr]
+	s.storeLock.Unlock()
+	return currentVersion
+}
+
+func (s *KAPISimulator) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
+	s.watchLock.Lock()
+	if _, ok := s.watchers[gvr]; !ok {
+		s.watchers[gvr] = make(map[string]chan watch.Event)
+	}
+	ch := make(chan watch.Event, 10)
+	s.watchers[gvr][namespace] = ch
+	s.watchLock.Unlock()
+	return ch
 }
 
 // broadcastEvent sends an event to all watchers for a GVR and namespace
@@ -655,6 +698,17 @@ func getNamespace(r *http.Request) (ns string) {
 	ns = r.PathValue("namespace")
 	if ns == "" {
 		ns = "default"
+	}
+	return
+}
+
+func getParseResourceVersion(r *http.Request) (resourceVersion int64, err error) {
+	paramValue := r.URL.Query().Get("resourceVersion")
+	return parseResourceVersion(paramValue)
+}
+func parseResourceVersion(rvStr string) (resourceVersion int64, err error) {
+	if rvStr != "" {
+		resourceVersion, err = strconv.ParseInt(rvStr, 10, 64)
 	}
 	return
 }
