@@ -34,6 +34,7 @@ var (
 )
 
 var schemeAdders = []func(scheme *runtime.Scheme) error{
+	metav1.AddMetaToScheme,
 	corev1.AddToScheme,
 	appsv1.AddToScheme,
 	coordinationv1.AddToScheme,

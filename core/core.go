@@ -2,17 +2,19 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"io"
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/json"
 	utilrand "k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/watch"
@@ -288,8 +290,8 @@ func (s *KAPISimulator) handleCreate(gvr schema.GroupVersionResource, newObjFn f
 		}
 
 		obj := newObjFn().(metav1.Object)
-		if err := json.NewDecoder(r.Body).Decode(obj); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+
+		if !readBodyIntoObj(w, r, obj) {
 			return
 		}
 
@@ -316,6 +318,18 @@ func (s *KAPISimulator) handleCreate(gvr schema.GroupVersionResource, newObjFn f
 		s.broadcastEvent(gvr, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
 		writeJsonResponse(r, w, obj)
 	}
+}
+
+func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj metav1.Object) (ok bool) {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+	if err := json.Unmarshal(data, obj); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+	ok = true
+	return
 }
 
 func (s *KAPISimulator) handleGet(gvr schema.GroupVersionResource) http.HandlerFunc {
@@ -362,7 +376,10 @@ func (s *KAPISimulator) handleDelete(gvr schema.GroupVersionResource) http.Handl
 			return
 		}
 		if !exists {
-			http.Error(w, "Not Found", http.StatusNotFound)
+			statusErr := apierrors.NewNotFound(gvr.GroupResource(), name)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			writeJsonResponse(r, w, statusErr.ErrStatus)
 			return
 		}
 		runtimeObj, ok := obj.(runtime.Object)
@@ -382,17 +399,17 @@ func (s *KAPISimulator) handleDelete(gvr schema.GroupVersionResource) http.Handl
 		}
 		s.broadcastEvent(gvr, namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
 		status := metav1.Status{
-			Status:  metav1.StatusSuccess,
-			Message: "",
-			Reason:  "",
+			TypeMeta: metav1.TypeMeta{ //No idea why this is needed, but kubectl complains
+				Kind:       "Status",
+				APIVersion: "v1",
+			},
+			Status: metav1.StatusSuccess,
 			Details: &metav1.StatusDetails{
 				Name: key,
-				Kind: "nodes",
+				Kind: gvr.GroupResource().Resource,
 				UID:  metav1Obj.GetUID(),
 			},
-			Code: 0,
 		}
-		w.WriteHeader(http.StatusOK)
 		writeJsonResponse(r, w, &status)
 	}
 }
@@ -554,15 +571,19 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 							continue // Skip invalid objects
 						}
 						event := watch.Event{Type: watch.Added, Object: runtimeObj}
-						if err := json.NewEncoder(w).Encode(event); err != nil {
+						// NOTE: Simple Json serialization does NOT work due to bug in Watch struct
+						//if err := json.NewEncoder(w).Encode(event); err != nil {
+						//	http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
+						//	s.removeWatch(gvr, namespace, ch)
+						//	return
+						//}
+						eventJson, err := buildWatchEventJson(&event)
+						if err != nil {
 							http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
-							s.watchLock.Lock()
-							delete(s.watchers[gvr], namespace)
-							close(ch)
-							s.watchLock.Unlock()
+							s.removeWatch(gvr, namespace, ch)
 							return
 						}
-						//_, _ = fmt.Fprintln(w)
+						_, _ = fmt.Fprintln(w, eventJson)
 						flusher.Flush()
 					}
 				}
@@ -574,14 +595,13 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 			case event := <-ch:
 				rv, _ := strconv.ParseInt(event.Object.(metav1.Object).GetResourceVersion(), 10, 64)
 				if resourceVersion == "" || rv > startVersion {
-					if err := json.NewEncoder(w).Encode(event); err != nil {
+					eventJson, err := buildWatchEventJson(&event)
+					if err != nil {
 						http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
-						s.watchLock.Lock()
-						delete(s.watchers[gvr], namespace)
-						close(ch)
-						s.watchLock.Unlock()
+						s.removeWatch(gvr, namespace, ch)
 						return
 					}
+					_, _ = fmt.Fprintln(w, eventJson)
 					flusher.Flush()
 				}
 			case <-r.Context().Done():
@@ -601,6 +621,13 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 	}
 }
 
+func (s *KAPISimulator) removeWatch(gvr schema.GroupVersionResource, namespace string, ch chan watch.Event) {
+	s.watchLock.Lock()
+	defer s.watchLock.Unlock()
+	delete(s.watchers[gvr], namespace)
+	close(ch)
+}
+
 func (s *KAPISimulator) getCurrentVersion(gvr schema.GroupVersionResource) int64 {
 	s.storeLock.Lock()
 	currentVersion := s.versions[gvr]
@@ -610,12 +637,12 @@ func (s *KAPISimulator) getCurrentVersion(gvr schema.GroupVersionResource) int64
 
 func (s *KAPISimulator) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
 	s.watchLock.Lock()
+	defer s.watchLock.Unlock()
 	if _, ok := s.watchers[gvr]; !ok {
 		s.watchers[gvr] = make(map[string]chan watch.Event)
 	}
 	ch := make(chan watch.Event, 10)
 	s.watchers[gvr][namespace] = ch
-	s.watchLock.Unlock()
 	return ch
 }
 
@@ -687,9 +714,9 @@ func writeJsonResponse(r *http.Request, w http.ResponseWriter, obj any) {
 func generateName(base string) string {
 	const suffixLen = 5
 	suffix := utilrand.String(suffixLen)
-	max := validation.DNS1123SubdomainMaxLength // 253 for subdomains; use DNS1123LabelMaxLength (63) if you need stricter
-	if len(base)+len(suffix) > max {
-		base = base[:max-len(suffix)]
+	m := validation.DNS1123SubdomainMaxLength // 253 for subdomains; use DNS1123LabelMaxLength (63) if you need stricter
+	if len(base)+len(suffix) > m {
+		base = base[:m-len(suffix)]
 	}
 	return base + suffix
 }
@@ -711,4 +738,13 @@ func parseResourceVersion(rvStr string) (resourceVersion int64, err error) {
 		resourceVersion, err = strconv.ParseInt(rvStr, 10, 64)
 	}
 	return
+}
+
+func buildWatchEventJson(event *watch.Event) (string, error) {
+	data, err := json.Marshal(event.Object)
+	if err != nil {
+		return "", err
+	}
+	payload := fmt.Sprintf("{\"type\":\"%s\",\"object\":%s}", event.Type, string(data))
+	return payload, nil
 }
