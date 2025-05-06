@@ -3,10 +3,10 @@ package core
 import (
 	"context"
 	"fmt"
+	"github.com/elankath/kapisim/core/typeinfo"
 	"io"
 	appsv1 "k8s.io/api/apps/v1"
 	coordinationv1 "k8s.io/api/coordination/v1"
-	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
@@ -15,50 +15,43 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/json"
-	utilrand "k8s.io/apimachinery/pkg/util/rand"
-	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"sync"
 	"time"
 )
 
-// KAPISimulator holds the in-memory stores, watch channels, and version tracking
-type KAPISimulator struct {
-	stores    map[schema.GroupVersionResource]cache.Store
-	watchers  map[schema.GroupVersionResource]map[string]chan watch.Event
-	versions  map[schema.GroupVersionResource]int64 // GVR -> latest resourceVersion
+// Simulator holds the in-memory stores, watch channels, and version tracking
+type Simulator struct {
 	scheme    *runtime.Scheme
 	mux       *http.ServeMux
-	watchLock sync.Mutex
 	storeLock sync.Mutex
+	stores    map[schema.GroupVersionResource]cache.Store
+	versions  map[schema.GroupVersionResource]int64 // GVR -> latest resourceVersion
+	watchers  map[schema.GroupVersionResource]map[string]chan watch.Event
+	watchLock sync.Mutex
 	server    *http.Server
 }
 
-func NewKAPISimulator() (*KAPISimulator, error) {
-	scheme, err := RegisterSchemes()
-	if err != nil {
-		return nil, err
-	}
-
+func NewKAPISimulator() (*Simulator, error) {
 	mux := http.NewServeMux()
 	stores := map[schema.GroupVersionResource]cache.Store{}
-	for _, gvr := range SupportedGVRs {
-		stores[gvr] = cache.NewStore(cache.MetaNamespaceKeyFunc)
+	for _, sd := range typeinfo.SupportedDescriptors {
+		stores[sd.GVR] = cache.NewStore(cache.MetaNamespaceKeyFunc)
 	}
-	s := &KAPISimulator{
+	s := &Simulator{
 		stores:   stores,
 		watchers: make(map[schema.GroupVersionResource]map[string]chan watch.Event),
 		versions: make(map[schema.GroupVersionResource]int64),
-		scheme:   scheme,
+		scheme:   typeinfo.SupportedScheme,
 		mux:      mux,
 		server:   &http.Server{Addr: ":8080", Handler: mux},
 	}
-
 	s.registerRoutes()
 	if err := s.generateKubeconfig(); err != nil {
 		return nil, fmt.Errorf("failed to generate kubeconfig: %w", err)
@@ -66,12 +59,12 @@ func NewKAPISimulator() (*KAPISimulator, error) {
 	return s, nil
 }
 
-func (s *KAPISimulator) GetMux() *http.ServeMux {
+func (s *Simulator) GetMux() *http.ServeMux {
 	return s.mux
 }
 
 // Start begins the HTTP server
-func (s *KAPISimulator) Start() error {
+func (s *Simulator) Start() error {
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server failed: %v", err)
 	}
@@ -79,9 +72,14 @@ func (s *KAPISimulator) Start() error {
 }
 
 // Shutdown cleans up resources and shuts down the HTTP server
-func (s *KAPISimulator) Shutdown(ctx context.Context) error {
-	// Close all watch channels
+func (s *Simulator) Shutdown(ctx context.Context) error {
+	s.closeWatches()
+	return s.server.Shutdown(ctx)
+}
+
+func (s *Simulator) closeWatches() {
 	s.watchLock.Lock()
+	defer s.watchLock.Unlock()
 	for gvr, nsWatchers := range s.watchers {
 		for ns, ch := range nsWatchers {
 			close(ch)
@@ -89,207 +87,156 @@ func (s *KAPISimulator) Shutdown(ctx context.Context) error {
 		}
 		delete(s.watchers, gvr)
 	}
-	s.watchLock.Unlock()
-
-	// Shut down the HTTP server
-	return s.server.Shutdown(ctx)
+	return
 }
-func (s *KAPISimulator) registerRoutes() {
+
+func (s *Simulator) registerRoutesForDescriptor(d typeinfo.Descriptor) {
+	var resPath string
+	if d.GVK.Group == "" {
+		resPath = "/api/v1/" + d.GVR.Resource
+	}
+	//Example: Core Path Pattern: "POST|GET /api/v1/namespaces"
+	//Example: Core Path Pattern: "GET|DELETE /api/v1/namespaces/{name}"
+	s.mux.HandleFunc(fmt.Sprintf("POST %s", resPath), s.handleCreate(typeinfo.NamespacesDescriptor))
+	s.mux.HandleFunc(fmt.Sprintf("GET %s", resPath), s.handleListOrWatch(typeinfo.NamespacesDescriptor))
+	//// Core v1: Namespaces
+	//s.mux.HandleFunc("POST /api/v1/namespaces", s.handleCreate(typeinfo.NamespacesDescriptor))
+	//s.mux.HandleFunc("GET /api/v1/namespaces", s.handleListOrWatch(GVRNamespaces))
+	//s.mux.HandleFunc("GET /api/v1/namespaces/{name}", s.handleGet(GVRNamespaces))
+	//s.mux.HandleFunc("DELETE /api/v1/namespaces/{name}", s.handleDelete(GVRNamespaces))
+}
+
+func (s *Simulator) registerRoutes() {
 	// API discovery
-	s.mux.HandleFunc("GET /api", s.handleCoreAPIVersions)
+	s.mux.HandleFunc("GET /api", s.handleAPIVersions)
 	s.mux.HandleFunc("GET /apis", s.handleAPIGroups)
 	//s.mux.HandleFunc("GET /api/v1", s.handleCoreAPIResources)
-	s.mux.HandleFunc("GET /api/v1/", s.handleCoreAPIResources)
+	s.mux.HandleFunc("GET /api/v1/", s.handleAPIResources(&typeinfo.SupportedCoreAPIResourceList))
 
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", appsv1.GroupName), s.handleAppsAPIResources)
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", coordinationv1.GroupName), s.handleCoordinationAPIResources)
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", eventsv1.GroupName), s.handleEventsAPIResources)
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", rbacv1.GroupName), s.handleRBACAPIResources)
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", schedulingv1.GroupName), s.handleSchedulingAPIResources)
-
-	// Core v1: Namespaces
-	s.mux.HandleFunc("POST /api/v1/namespaces", s.handleCreate(GVRNamespaces, func() runtime.Object { return &corev1.Namespace{} }))
-	s.mux.HandleFunc("GET /api/v1/namespaces", s.handleListOrWatch(GVRNamespaces, func() runtime.Object { return &corev1.NamespaceList{} }))
-	s.mux.HandleFunc("GET /api/v1/namespaces/{name}", s.handleGet(GVRNamespaces))
-	s.mux.HandleFunc("DELETE /api/v1/namespaces/{name}", s.handleDelete(GVRNamespaces))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", appsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedAppsAPIResourceList))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", coordinationv1.GroupName), s.handleAPIResources(&typeinfo.SupportedCoordinationAPIResourceList))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", eventsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedEventsAPIResourceList))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", rbacv1.GroupName), s.handleAPIResources(&typeinfo.SupportedRBACAPIResourceList))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", schedulingv1.GroupName), s.handleAPIResources(&typeinfo.SupportedSchedulingAPIResourceList))
 
 	// Core v1: Nodes
-	s.mux.HandleFunc("POST /api/v1/nodes", s.handleCreate(GVRNodes, func() runtime.Object { return &corev1.Node{} }))
-	s.mux.HandleFunc("GET /api/v1/nodes", s.handleListOrWatch(GVRNodes, func() runtime.Object { return &corev1.NodeList{} }))
-	s.mux.HandleFunc("DELETE /api/v1/nodes/{name}", s.handleDelete(GVRNodes))
-	s.mux.HandleFunc("GET /api/v1/nodes/{name}", s.handleGet(GVRNodes))
+	s.registerCoreResourceRoutes(typeinfo.NodesDescriptor)
 
 	// Core v1: Pods
-	s.mux.HandleFunc("POST /api/v1/namespaces/{namespace}/pods", s.handleCreate(GVRPods, func() runtime.Object { return &corev1.Pod{} }))
-	s.mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods", s.handleListOrWatch(GVRPods, func() runtime.Object { return &corev1.PodList{} }))
-	s.mux.HandleFunc("GET /api/v1/namespaces/{namespace}/pods/{name}", s.handleGet(GVRPods))
-	s.mux.HandleFunc("DELETE /api/v1/namespaces/{namespace}/pods/{name}", s.handleDelete(GVRPods))
+	s.registerCoreNamespacedResourceRoutes(typeinfo.PodsDescriptor)
 
 	// Scheduling v1: PriorityClasses
-	s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleCreate(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClass{} }))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleListOrWatch(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClassList{} }))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleGet(GVRPriorityClasses))
-	s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleDelete(GVRPriorityClasses))
+	s.registerGroupNamespacedResourceRoutes(typeinfo.PriorityClassesDescriptor)
+	//s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleCreate(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClass{} }))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleListOrWatch(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClassList{} }))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleGet(GVRPriorityClasses))
+	//s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleDelete(GVRPriorityClasses))
 
 	// Apps v1: Deployments
-	s.mux.HandleFunc("POST /apis/apps/v1/namespaces/{namespace}/deployments", s.handleCreate(GVRDeployments, func() runtime.Object { return &appsv1.Deployment{} }))
-	s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleGet(GVRDeployments))
-	s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments", s.handleListOrWatch(GVRDeployments, func() runtime.Object { return &appsv1.DeploymentList{} }))
-	s.mux.HandleFunc("DELETE /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleDelete(GVRDeployments))
+	s.registerGroupNamespacedResourceRoutes(typeinfo.DeploymentDescriptor)
+	//s.mux.HandleFunc("POST /apis/apps/v1/namespaces/{namespace}/deployments", s.handleCreate(GVRDeployments, func() runtime.Object { return &appsv1.Deployment{} }))
+	//s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleGet(GVRDeployments))
+	//s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments", s.handleListOrWatch(GVRDeployments, func() runtime.Object { return &appsv1.DeploymentList{} }))
+	//s.mux.HandleFunc("DELETE /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleDelete(GVRDeployments))
 
 	// Coordination v1: Leases
-	s.mux.HandleFunc("POST /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleCreate(GVRLeases, func() runtime.Object { return &coordinationv1.Lease{} }))
-	s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleGet(GVRLeases))
-	s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleListOrWatch(GVRLeases, func() runtime.Object { return &coordinationv1.LeaseList{} }))
-	s.mux.HandleFunc("DELETE /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleDelete(GVRLeases))
+	s.registerGroupNamespacedResourceRoutes(typeinfo.LeaseDescriptor)
+	//s.mux.HandleFunc("POST /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleCreate(GVRLeases, func() runtime.Object { return &coordinationv1.Lease{} }))
+	//s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleGet(GVRLeases))
+	//s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleListOrWatch(GVRLeases, func() runtime.Object { return &coordinationv1.LeaseList{} }))
+	//s.mux.HandleFunc("DELETE /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleDelete(GVRLeases))
 
 	// Events v1: Events
-	s.mux.HandleFunc("POST /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleCreate(GVREvents, func() runtime.Object { return &eventsv1.Event{} }))
-	s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleGet(GVREvents))
-	s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleListOrWatch(GVREvents, func() runtime.Object { return &eventsv1.EventList{} }))
-	s.mux.HandleFunc("DELETE /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleDelete(GVREvents))
+	s.registerGroupNamespacedResourceRoutes(typeinfo.EventsDescriptor)
+	//s.mux.HandleFunc("POST /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleCreate(GVREvents, func() runtime.Object { return &eventsv1.Event{} }))
+	//s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleGet(GVREvents))
+	//s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleListOrWatch(GVREvents, func() runtime.Object { return &eventsv1.EventList{} }))
+	//s.mux.HandleFunc("DELETE /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleDelete(GVREvents))
 
 	// RBAC v1: Roles
-	s.mux.HandleFunc("POST /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleCreate(GVRRoles, func() runtime.Object { return &rbacv1.Role{} }))
-	s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleGet(GVRRoles))
-	s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleListOrWatch(GVRRoles, func() runtime.Object { return &rbacv1.RoleList{} }))
-	s.mux.HandleFunc("DELETE /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleDelete(GVRRoles))
+	s.registerGroupNamespacedResourceRoutes(typeinfo.RolesDescriptor)
+	//s.mux.HandleFunc("POST /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleCreate(GVRRoles, func() runtime.Object { return &rbacv1.Role{} }))
+	//s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleGet(GVRRoles))
+	//s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleListOrWatch(GVRRoles, func() runtime.Object { return &rbacv1.RoleList{} }))
+	//s.mux.HandleFunc("DELETE /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleDelete(GVRRoles))
+}
+
+func (s *Simulator) registerCoreResourceRoutes(d typeinfo.Descriptor) {
+	r := d.GVR.Resource
+	s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(typeinfo.NodesDescriptor))
+	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(typeinfo.NodesDescriptor))
+	s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(typeinfo.NodesDescriptor))
+	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(typeinfo.NodesDescriptor))
+	//s.mux.HandleFunc("POST /api/v1/nodes", s.handleCreate(typeinfo.NodesDescriptor))
+	//s.mux.HandleFunc("GET /api/v1/nodes", s.handleListOrWatch(typeinfo.NodesDescriptor))
+	//s.mux.HandleFunc("DELETE /api/v1/nodes/{name}", s.handleDelete(typeinfo.NodesDescriptor))
+	//s.mux.HandleFunc("GET /api/v1/nodes/{name}", s.handleGet(typeinfo.NodesDescriptor))
+}
+func (s *Simulator) registerCoreNamespacedResourceRoutes(d typeinfo.Descriptor) {
+	r := d.GVR.Resource
+	s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
+	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
+	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
+	s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
+}
+
+func (s *Simulator) registerGroupNamespacedResourceRoutes(d typeinfo.Descriptor) {
+	g := d.GVK.Group
+	r := d.GVR.Resource
+	//s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
+	//s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}",r), s.handleDelete(d))
+
+	s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
+	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleGet(d))
+	s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleDelete(d))
 }
 
 // handleAPIGroups returns the list of supported API groups
-func (s *KAPISimulator) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
+func (s *Simulator) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
-	writeJsonResponse(r, w, &apiGroupList)
+	writeJsonResponse(w, r, &typeinfo.SupportedAPIGroups)
 }
 
-// handleCoreAPIVersions returns the list of versions for the core API group
-func (s *KAPISimulator) handleCoreAPIVersions(w http.ResponseWriter, r *http.Request) {
+// handleAPIVersions returns the list of versions for the core API group
+func (s *Simulator) handleAPIVersions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJsonResponse(r, w, &apiVersions)
+	writeJsonResponse(w, r, &typeinfo.SupportedAPIVersions)
 }
 
-// handleCoreAPIResources returns the list of supported resources for the core API group
-func (s *KAPISimulator) handleCoreAPIResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	writeJsonResponse(r, w, &coreAPIResourceList)
-}
-
-// handleAppsAPIResources returns the list of supported resources for the apps API group
-func (s *KAPISimulator) handleAppsAPIResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	writeJsonResponse(r, w, &appsAPIResourceList)
-}
-
-// handleCoordinationAPIResources returns the list of supported resources for the coordination.k8s.io API group
-func (s *KAPISimulator) handleCoordinationAPIResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	apiResourceList := &metav1.APIResourceList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIResourceList",
-			APIVersion: "v1",
-		},
-		GroupVersion: coordinationv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			{
-				Name:       "leases",
-				Kind:       "Lease",
-				Namespaced: true,
-				Verbs:      []string{"create", "delete", "get", "list", "watch"},
-			},
-		},
-	}
-
-	writeJsonResponse(r, w, &apiResourceList)
-}
-
-// handleEventsAPIResources returns the list of supported resources for the events.k8s.io API group
-func (s *KAPISimulator) handleEventsAPIResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	writeJsonResponse(r, w, &eventsAPIResourceList)
-}
-
-// handleRBACAPIResources returns the list of supported resources for the rbac.authorization.k8s.io API group
-func (s *KAPISimulator) handleRBACAPIResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	apiResourceList := &metav1.APIResourceList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIResourceList",
-			APIVersion: "v1",
-		},
-		GroupVersion: rbacv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			{
-				Name:       "roles",
-				Kind:       "Role",
-				Namespaced: true,
-				Verbs:      []string{"create", "delete", "get", "list", "watch"},
-			},
-		},
-	}
-
-	writeJsonResponse(r, w, &apiResourceList)
-}
-
-// handleSchedulingAPIResources returns the list of supported resources for the "scheduling.k8s.io" API group
-func (s *KAPISimulator) handleSchedulingAPIResources(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	apiResourceList := &metav1.APIResourceList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIResourceList",
-			APIVersion: "v1",
-		},
-		GroupVersion: schedulingv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			{
-				Name:       "priorityclasses",
-				Kind:       "PriorityClass",
-				Namespaced: true,
-				Verbs:      []string{"create", "delete", "get", "list"},
-			},
-		},
-	}
-
-	writeJsonResponse(r, w, &apiResourceList)
-}
-func (s *KAPISimulator) handleCreate(gvr schema.GroupVersionResource, newObjFn func() runtime.Object) http.HandlerFunc {
+func (s *Simulator) handleAPIResources(apiResourceList *metav1.APIResourceList) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStore(gvr)
-		if store == nil {
-			http.Error(w, "Resource not supported", http.StatusNotFound)
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		writeJsonResponse(w, r, apiResourceList)
+	}
+}
 
-		obj := newObjFn().(metav1.Object)
+func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		store := s.getStoreOrWriteError(descriptor.GVR, w, r)
+		if store == nil {
+			return
+		}
+		var obj metav1.Object
+		var err error
+		obj, err = descriptor.CreateObject()
+
+		if err != nil {
+			klog.Errorf("Error creating object from GVK %q: %v", descriptor.GVK, err)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 
 		if !readBodyIntoObj(w, r, obj) {
 			return
@@ -303,47 +250,31 @@ func (s *KAPISimulator) handleCreate(gvr schema.GroupVersionResource, newObjFn f
 				http.Error(w, "Name or GenerateName is required", http.StatusBadRequest)
 				return
 			}
-			name = generateName(namePrefix)
+			name = typeinfo.GenerateName(namePrefix)
 		}
 
 		obj.SetName(name)
 		obj.SetNamespace(namespace)
-		obj.SetResourceVersion(s.nextResourceVersion(gvr))
+		obj.SetResourceVersion(s.nextResourceVersion(descriptor.GVR))
 		obj.SetCreationTimestamp(metav1.Now())
 
 		if err := store.Add(obj); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.broadcastEvent(gvr, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
-		writeJsonResponse(r, w, obj)
+		s.broadcastEvent(descriptor.GVR, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
+		writeJsonResponse(w, r, obj)
 	}
 }
 
-func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj metav1.Object) (ok bool) {
-	data, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	}
-	if err := json.Unmarshal(data, obj); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-	}
-	ok = true
-	return
-}
-
-func (s *KAPISimulator) handleGet(gvr schema.GroupVersionResource) http.HandlerFunc {
+func (s *Simulator) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStore(gvr)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
-			http.Error(w, "Resource not supported", http.StatusNotFound)
 			return
 		}
 
-		namespace := getNamespace(r)
-		name := r.PathValue("name")
-		key := namespace + "/" + name
-
+		key := GetObjectKey(r)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -352,34 +283,27 @@ func (s *KAPISimulator) handleGet(gvr schema.GroupVersionResource) http.HandlerF
 		if !exists {
 			http.Error(w, "Not Found", http.StatusNotFound)
 			return
-
 		}
-		writeJsonResponse(r, w, obj)
+		writeJsonResponse(w, r, obj)
 	}
 }
 
-func (s *KAPISimulator) handleDelete(gvr schema.GroupVersionResource) http.HandlerFunc {
+func (s *Simulator) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStore(gvr)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
-			http.Error(w, "Resource not supported", http.StatusNotFound)
 			return
 		}
 
-		namespace := getNamespace(r)
-		name := r.PathValue("name")
-		key := namespace + "/" + name
-
-		obj, exists, err := store.GetByKey(key)
+		on := GetObjectName(r)
+		obj, exists, err := store.GetByKey(on.String())
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		if !exists {
-			statusErr := apierrors.NewNotFound(gvr.GroupResource(), name)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusNotFound)
-			writeJsonResponse(r, w, statusErr.ErrStatus)
+			statusErr := apierrors.NewNotFound(d.GVR.GroupResource(), on.String())
+			writeStatusError(w, r, statusErr)
 			return
 		}
 		runtimeObj, ok := obj.(runtime.Object)
@@ -397,7 +321,7 @@ func (s *KAPISimulator) handleDelete(gvr schema.GroupVersionResource) http.Handl
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		s.broadcastEvent(gvr, namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
+		s.broadcastEvent(d.GVR, on.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
 		status := metav1.Status{
 			TypeMeta: metav1.TypeMeta{ //No idea why this is needed, but kubectl complains
 				Kind:       "Status",
@@ -405,200 +329,234 @@ func (s *KAPISimulator) handleDelete(gvr schema.GroupVersionResource) http.Handl
 			},
 			Status: metav1.StatusSuccess,
 			Details: &metav1.StatusDetails{
-				Name: key,
-				Kind: gvr.GroupResource().Resource,
+				Name: on.String(),
+				Kind: d.GVR.GroupResource().Resource,
 				UID:  metav1Obj.GetUID(),
 			},
 		}
-		writeJsonResponse(r, w, &status)
+		writeJsonResponse(w, r, &status)
 	}
 }
 
-func (s *KAPISimulator) handleListOrWatch(gvr schema.GroupVersionResource, newListFn func() runtime.Object) http.HandlerFunc {
+func (s *Simulator) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		isWatch := query.Get("watch")
 		var delegate http.HandlerFunc
 		if isWatch == "true" {
-			delegate = s.handleWatch(gvr)
+			delegate = s.handleWatch(d)
 		} else {
-			delegate = s.handleList(gvr, newListFn)
+			delegate = s.handleList(d)
 		}
 		delegate.ServeHTTP(w, r)
 	}
 }
-func (s *KAPISimulator) handleList(gvr schema.GroupVersionResource, newListFn func() runtime.Object) http.HandlerFunc {
+func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStore(gvr)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
-			http.Error(w, "Resource not supported", http.StatusNotFound)
 			return
 		}
-
 		namespace := getNamespace(r)
 		items := store.List()
-		currentVersion := s.nextResourceVersion(gvr)
-
-		list := createList(currentVersion, items, namespace, newListFn)
-		writeJsonResponse(r, w, list)
+		currentVersionStr := fmt.Sprintf("%d", s.getCurrentVersion(d.GVR))
+		objItems, err := FromAnySlice(items)
+		if err != nil {
+			statusErr := apierrors.NewInternalError(err)
+			writeStatusError(w, r, statusErr)
+			return
+		}
+		list, err := createList(d, namespace, currentVersionStr, objItems)
+		if err != nil {
+			statusErr := apierrors.NewInternalError(err)
+			writeStatusError(w, r, statusErr)
+			return
+		}
+		writeJsonResponse(w, r, list)
 	}
 }
 
-func createList(currentVersion string, items []any, namespace string, newListFn func() runtime.Object) runtime.Object {
-	list := newListFn()
-	switch list := list.(type) {
-	case *corev1.PodList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "PodList", APIVersion: GVRPods.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-		list.Items = make([]corev1.Pod, 0, len(items))
-		for _, item := range items {
-			pod := item.(*corev1.Pod)
-			if pod.Namespace == namespace {
-				list.Items = append(list.Items, *pod)
-			}
-			pod.Status.Phase = corev1.PodPending
-		}
-	case *corev1.NamespaceList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "NamespaceList", APIVersion: GVRNamespaces.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-		list.Items = make([]corev1.Namespace, 0, len(items))
-		for _, item := range items {
-			ns := item.(*corev1.Namespace)
-			list.Items = append(list.Items, *ns)
-		}
-	case *corev1.NodeList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "NodeList", APIVersion: GVRNodes.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-		list.Items = make([]corev1.Node, 0, len(items))
-		for _, item := range items {
-			node := item.(*corev1.Node)
-			list.Items = append(list.Items, *node)
-			node.Status.Phase = corev1.NodeRunning
-		}
-	case *appsv1.DeploymentList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "DeploymentList", APIVersion: GVRDeployments.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-		list.Items = make([]appsv1.Deployment, 0, len(items))
-		for _, item := range items {
-			deploy := item.(*appsv1.Deployment)
-			if deploy.Namespace == namespace {
-				list.Items = append(list.Items, *deploy)
-			}
-		}
-	case *coordinationv1.LeaseList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "LeaseList", APIVersion: GVRLeases.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-		list.Items = make([]coordinationv1.Lease, 0, len(items))
-		for _, item := range items {
-			lease := item.(*coordinationv1.Lease)
-			if lease.Namespace == namespace {
-				list.Items = append(list.Items, *lease)
-			}
-		}
-	case *eventsv1.EventList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "EventList", APIVersion: GVREvents.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: currentVersion}
-		list.Items = make([]eventsv1.Event, 0, len(items))
-		for _, item := range items {
-			event := item.(*eventsv1.Event)
-			if event.Namespace == namespace {
-				list.Items = append(list.Items, *event)
-			}
-		}
-	case *rbacv1.RoleList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "RoleList", APIVersion: GVRRoles.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
-		list.Items = make([]rbacv1.Role, 0, len(items))
-		for _, item := range items {
-			role := item.(*rbacv1.Role)
-			if role.Namespace == namespace {
-				list.Items = append(list.Items, *role)
-			}
-		}
-	case *schedulingv1.PriorityClassList:
-		list.TypeMeta = metav1.TypeMeta{Kind: "PriorityClassList", APIVersion: GVRPriorityClasses.GroupVersion().String()}
-		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
-		list.Items = make([]schedulingv1.PriorityClass, 0, len(items))
-		for _, item := range items {
-			pc := item.(*schedulingv1.PriorityClass)
-			if pc.Namespace == namespace {
-				list.Items = append(list.Items, *pc)
-			}
-		}
+// createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
+// Consider using unstructured.Unstructured here for generic handling or reflection?
+func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
+	//listObj, err := typeinfo.SupportedScheme.New(d.ListGVK)
+	//if err != nil {
+	//	return nil, fmt.Errorf("failed to create new list object for %q due to %v", d.ListGVK, err)
+	//}
+	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
+	listType, ok := typesMap[string(d.ListKind)]
+	if !ok {
+		return nil, runtime.NewNotRegisteredErrForKind(typeinfo.SupportedScheme.Name(), d.ListGVK)
 	}
-	return list
+	ptr := reflect.New(listType) // *PodList
+	listObjVal := ptr.Elem()     // PodList
+	typeMetaVal := listObjVal.FieldByName("TypeMeta")
+	if !typeMetaVal.IsValid() {
+		return nil, fmt.Errorf("failed to get TypeMeta field on %v", listObjVal)
+	}
+	listMetaVal := listObjVal.FieldByName("ListMeta")
+	if !listMetaVal.IsValid() {
+		return nil, fmt.Errorf("failed to get ListMeta field on %v", listObjVal)
+	}
+	typeMetaVal.Set(reflect.ValueOf(metav1.TypeMeta{
+		Kind:       d.GVK.Kind,
+		APIVersion: d.APIResource.Version,
+	}))
+	listMetaVal.Set(reflect.ValueOf(metav1.ListMeta{
+		ResourceVersion: currVersionStr,
+	}))
+
+	itemsField := listObjVal.FieldByName("Items")
+	if !itemsField.IsValid() || !itemsField.CanSet() || itemsField.Kind() != reflect.Slice {
+		return nil, fmt.Errorf("list object for %q does not have a settable slice field named Items", d.GVK.Kind)
+	}
+	itemType := itemsField.Type().Elem() // e.g., v1.Pod
+	resultSlice := reflect.MakeSlice(itemsField.Type(), 0, len(items))
+
+	for _, obj := range items {
+		val := reflect.ValueOf(obj)
+		if val.Kind() != reflect.Ptr || val.IsNil() {
+			return nil, fmt.Errorf("element for kind %q is not a non-nil pointer: %T", d.Kind, obj)
+		}
+		if val.Elem().Type() != itemType {
+			return nil, fmt.Errorf("type mismatch, list kind %q expects items of type %v, but got %v", d.ListKind, itemType, val.Elem().Type())
+		}
+		resultSlice = reflect.Append(resultSlice, val.Elem()) // append the dereferenced struct
+	}
+	itemsField.Set(resultSlice)
+	listObj := ptr.Interface().(runtime.Object)
+	return listObj, nil
 }
 
-func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.HandlerFunc {
+// createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
+// Consider using unstructured.Unstructured here for generic handling or reflection?
+//func createListOld(version string, items []any, namespace string, newListFn func() runtime.Object) runtime.Object {
+//	list := newListFn()
+//	list.DeepCopyObject()
+//	switch list := list.(type) {
+//	case *corev1.PodList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "PodList", APIVersion: GVRPods.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
+//		list.Items = make([]corev1.Pod, 0, len(items))
+//		for _, item := range items {
+//			pod := item.(*corev1.Pod)
+//			if pod.Namespace == namespace {
+//				list.Items = append(list.Items, *pod)
+//			}
+//			pod.Status.Phase = corev1.PodPending
+//		}
+//	case *corev1.NamespaceList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "NamespaceList", APIVersion: GVRNamespaces.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
+//		list.Items = make([]corev1.Namespace, 0, len(items))
+//		for _, item := range items {
+//			ns := item.(*corev1.Namespace)
+//			list.Items = append(list.Items, *ns)
+//		}
+//	case *corev1.NodeList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "NodeList", APIVersion: GVRNodes.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
+//		list.Items = make([]corev1.Node, 0, len(items))
+//		for _, item := range items {
+//			node := item.(*corev1.Node)
+//			list.Items = append(list.Items, *node)
+//			node.Status.Phase = corev1.NodeRunning
+//		}
+//	case *appsv1.DeploymentList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "DeploymentList", APIVersion: GVRDeployments.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
+//		list.Items = make([]appsv1.Deployment, 0, len(items))
+//		for _, item := range items {
+//			deploy := item.(*appsv1.Deployment)
+//			if deploy.Namespace == namespace {
+//				list.Items = append(list.Items, *deploy)
+//			}
+//		}
+//	case *coordinationv1.LeaseList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "LeaseList", APIVersion: GVRLeases.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
+//		list.Items = make([]coordinationv1.Lease, 0, len(items))
+//		for _, item := range items {
+//			lease := item.(*coordinationv1.Lease)
+//			if lease.Namespace == namespace {
+//				list.Items = append(list.Items, *lease)
+//			}
+//		}
+//	case *eventsv1.EventList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "EventList", APIVersion: GVREvents.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
+//		list.Items = make([]eventsv1.Event, 0, len(items))
+//		for _, item := range items {
+//			event := item.(*eventsv1.Event)
+//			if event.Namespace == namespace {
+//				list.Items = append(list.Items, *event)
+//			}
+//		}
+//	case *rbacv1.RoleList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "RoleList", APIVersion: GVRRoles.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
+//		list.Items = make([]rbacv1.Role, 0, len(items))
+//		for _, item := range items {
+//			role := item.(*rbacv1.Role)
+//			if role.Namespace == namespace {
+//				list.Items = append(list.Items, *role)
+//			}
+//		}
+//	case *schedulingv1.PriorityClassList:
+//		list.TypeMeta = metav1.TypeMeta{Kind: "PriorityClassList", APIVersion: GVRPriorityClasses.GroupVersion().String()}
+//		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
+//		list.Items = make([]schedulingv1.PriorityClass, 0, len(items))
+//		for _, item := range items {
+//			pc := item.(*schedulingv1.PriorityClass)
+//			if pc.Namespace == namespace {
+//				list.Items = append(list.Items, *pc)
+//			}
+//		}
+//	}
+//	return list
+//}
+
+func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStore(gvr)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
-			http.Error(w, "Resource not supported", http.StatusNotFound)
 			return
 		}
 
-		namespace := getNamespace(r)
-		resourceVersion := r.URL.Query().Get("resourceVersion")
-		var startVersion int64
-		if resourceVersion != "" {
-			var err error
-			startVersion, err = strconv.ParseInt(resourceVersion, 10, 64)
-			if err != nil {
-				http.Error(w, "Invalid resourceVersion", http.StatusBadRequest)
-				return
-			}
+		var ok bool
+		var startVersion, currentVersion int64
+		var namespace string
+
+		namespace = getNamespace(r)
+		startVersion, ok = getParseResourceVersion(w, r)
+		if !ok {
+			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Transfer-Encoding", "chunked")
-		flusher, ok := w.(http.Flusher)
-		if !ok {
-			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		flusher := getFlusher(w)
+		if flusher == nil {
 			return
 		}
-
-		ch := s.createWatchChan(gvr, namespace)
-		currentVersion := s.getCurrentVersion(gvr)
-
-		if resourceVersion == "" || startVersion < currentVersion {
-			items := store.List()
-			for _, item := range items {
-				if obj, ok := item.(metav1.Object); ok && obj.GetNamespace() == namespace {
-					rv, _ := strconv.ParseInt(obj.GetResourceVersion(), 10, 64)
-					if resourceVersion == "" || rv > startVersion {
-						runtimeObj, ok := item.(runtime.Object)
-						if !ok {
-							continue // Skip invalid objects
-						}
-						event := watch.Event{Type: watch.Added, Object: runtimeObj}
-						// NOTE: Simple Json serialization does NOT work due to bug in Watch struct
-						//if err := json.NewEncoder(w).Encode(event); err != nil {
-						//	http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
-						//	s.removeWatch(gvr, namespace, ch)
-						//	return
-						//}
-						eventJson, err := buildWatchEventJson(&event)
-						if err != nil {
-							http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
-							s.removeWatch(gvr, namespace, ch)
-							return
-						}
-						_, _ = fmt.Fprintln(w, eventJson)
-						flusher.Flush()
-					}
-				}
+		currentVersion = s.getCurrentVersion(d.GVR)
+		if startVersion < currentVersion {
+			ok = sendPendingAddEvents(w, r, namespace, startVersion, store.List())
+			if !ok {
+				return
 			}
 		}
 
+		ch := s.createWatchChan(d.GVR, namespace)
 		for {
 			select {
 			case event := <-ch:
 				rv, _ := strconv.ParseInt(event.Object.(metav1.Object).GetResourceVersion(), 10, 64)
-				if resourceVersion == "" || rv > startVersion {
+				if rv > startVersion {
 					eventJson, err := buildWatchEventJson(&event)
 					if err != nil {
 						http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
-						s.removeWatch(gvr, namespace, ch)
+						s.removeWatch(d.GVR, namespace, ch)
 						return
 					}
 					_, _ = fmt.Fprintln(w, eventJson)
@@ -606,13 +564,13 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 				}
 			case <-r.Context().Done():
 				s.watchLock.Lock()
-				delete(s.watchers[gvr], namespace)
+				delete(s.watchers[d.GVR], namespace)
 				close(ch)
 				s.watchLock.Unlock()
 				return
 			case <-time.After(30 * time.Second):
 				s.watchLock.Lock()
-				delete(s.watchers[gvr], namespace)
+				delete(s.watchers[d.GVR], namespace)
 				close(ch)
 				s.watchLock.Unlock()
 				return
@@ -621,21 +579,63 @@ func (s *KAPISimulator) handleWatch(gvr schema.GroupVersionResource) http.Handle
 	}
 }
 
-func (s *KAPISimulator) removeWatch(gvr schema.GroupVersionResource, namespace string, ch chan watch.Event) {
+func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace string, startVersion int64, items []any) (ok bool) {
+	flusher := getFlusher(w)
+	if flusher == nil {
+		return
+	}
+	for _, item := range items {
+		var obj metav1.Object
+		var rv int64
+		obj, ok = item.(metav1.Object)
+		if !ok || obj.GetNamespace() != namespace {
+			continue
+		}
+		rv, err := parseObjectResourceVersion(obj)
+		if err != nil {
+			handleInternalServerError(w, r, err)
+			return
+		}
+		if rv <= startVersion {
+			continue
+		}
+		event := watch.Event{Type: watch.Added, Object: item.(runtime.Object)}
+		eventJson, err := buildWatchEventJson(&event)
+		if err != nil {
+			err = fmt.Errorf("failed to encode watch event for obj %q, ns %q, rv: %d: %w", obj.GetName(), obj.GetNamespace(), rv, err)
+			handleInternalServerError(w, r, err)
+			return
+		}
+		_, _ = fmt.Fprintln(w, eventJson)
+		flusher.Flush()
+	}
+	ok = true
+	return
+}
+
+func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error) {
+	klog.Error(err)
+	statusErr := apierrors.NewInternalError(err)
+	w.WriteHeader(http.StatusInternalServerError)
+	w.Header().Set("Content-Type", "application/json")
+	writeJsonResponse(w, r, statusErr.ErrStatus)
+}
+
+func (s *Simulator) removeWatch(gvr schema.GroupVersionResource, namespace string, ch chan watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 	delete(s.watchers[gvr], namespace)
 	close(ch)
 }
 
-func (s *KAPISimulator) getCurrentVersion(gvr schema.GroupVersionResource) int64 {
+func (s *Simulator) getCurrentVersion(gvr schema.GroupVersionResource) int64 {
 	s.storeLock.Lock()
 	currentVersion := s.versions[gvr]
 	s.storeLock.Unlock()
 	return currentVersion
 }
 
-func (s *KAPISimulator) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
+func (s *Simulator) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 	if _, ok := s.watchers[gvr]; !ok {
@@ -647,7 +647,7 @@ func (s *KAPISimulator) createWatchChan(gvr schema.GroupVersionResource, namespa
 }
 
 // broadcastEvent sends an event to all watchers for a GVR and namespace
-func (s *KAPISimulator) broadcastEvent(gvr schema.GroupVersionResource, namespace string, event watch.Event) {
+func (s *Simulator) broadcastEvent(gvr schema.GroupVersionResource, namespace string, event watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 
@@ -662,7 +662,7 @@ func (s *KAPISimulator) broadcastEvent(gvr schema.GroupVersionResource, namespac
 }
 
 // generateKubeconfig creates a simple kubeconfig file at /tmp/kapisim.yaml
-func (s *KAPISimulator) generateKubeconfig() error {
+func (s *Simulator) generateKubeconfig() error {
 	kubeconfig := `apiVersion: v1
 kind: Config
 clusters:
@@ -684,41 +684,44 @@ users:
 	return os.WriteFile("/tmp/kapisim.yaml", []byte(kubeconfig), 0644)
 }
 
-func (s *KAPISimulator) getStore(gvr schema.GroupVersionResource) cache.Store {
+func (s *Simulator) getStore(gvr schema.GroupVersionResource) cache.Store {
 	return s.stores[gvr]
 }
 
+func (s *Simulator) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter, r *http.Request) (store cache.Store) {
+	store = s.getStore(gvr)
+	if store == nil {
+		http.Error(w, "Resource not supported", http.StatusNotFound)
+	}
+	return
+}
+
 // nextResourceVersion increments and returns the next version for a GVR
-func (s *KAPISimulator) nextResourceVersion(gvr schema.GroupVersionResource) string {
+func (s *Simulator) nextResourceVersion(gvr schema.GroupVersionResource) string {
 	s.storeLock.Lock()
 	defer s.storeLock.Unlock()
 	s.versions[gvr]++
 	return strconv.FormatInt(s.versions[gvr], 10)
 }
 
-func (s *KAPISimulator) currResourceVersion(gvr schema.GroupVersionResource) string {
+func (s *Simulator) currResourceVersion(gvr schema.GroupVersionResource) string {
 	s.storeLock.Lock()
 	defer s.storeLock.Unlock()
 	return strconv.FormatInt(s.versions[gvr], 10)
 }
 
+func writeStatusError(w http.ResponseWriter, r *http.Request, statusError *apierrors.StatusError) {
+	w.WriteHeader(int(statusError.ErrStatus.Code))
+	writeJsonResponse(w, r, statusError.ErrStatus)
+}
+
 // writeJsonResponse sets Content-Type to application/json  and encodes the object to the response writer.
-func writeJsonResponse(r *http.Request, w http.ResponseWriter, obj any) {
+func writeJsonResponse(w http.ResponseWriter, r *http.Request, obj any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(obj); err != nil {
 		klog.Errorf("Failed to encode %s response: %v", r.URL.Path, err)
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 	}
-}
-
-func generateName(base string) string {
-	const suffixLen = 5
-	suffix := utilrand.String(suffixLen)
-	m := validation.DNS1123SubdomainMaxLength // 253 for subdomains; use DNS1123LabelMaxLength (63) if you need stricter
-	if len(base)+len(suffix) > m {
-		base = base[:m-len(suffix)]
-	}
-	return base + suffix
 }
 
 func getNamespace(r *http.Request) (ns string) {
@@ -729,9 +732,26 @@ func getNamespace(r *http.Request) (ns string) {
 	return
 }
 
-func getParseResourceVersion(r *http.Request) (resourceVersion int64, err error) {
+func getParseResourceVersion(w http.ResponseWriter, r *http.Request) (resourceVersion int64, ok bool) {
 	paramValue := r.URL.Query().Get("resourceVersion")
-	return parseResourceVersion(paramValue)
+	if paramValue == "" {
+		resourceVersion = 0
+		return
+	}
+	resourceVersion, err := parseResourceVersion(paramValue)
+	if err != nil {
+		http.Error(w, "Invalid resourceVersion", http.StatusBadRequest)
+		return
+	}
+	ok = true
+	return
+}
+func parseObjectResourceVersion(obj metav1.Object) (resourceVersion int64, err error) {
+	resourceVersion, err = parseResourceVersion(obj.GetResourceVersion())
+	if err != nil {
+		err = fmt.Errorf("failed to parse resource version %q for object %q in ns %q: %w", obj.GetResourceVersion(), obj.GetName(), obj.GetNamespace(), err)
+	}
+	return
 }
 func parseResourceVersion(rvStr string) (resourceVersion int64, err error) {
 	if rvStr != "" {
@@ -739,12 +759,62 @@ func parseResourceVersion(rvStr string) (resourceVersion int64, err error) {
 	}
 	return
 }
-
+func getFlusher(w http.ResponseWriter) http.Flusher {
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Transfer-Encoding", "chunked")
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return flusher
+	}
+	return nil
+}
 func buildWatchEventJson(event *watch.Event) (string, error) {
+	// NOTE: Simple Json serialization does NOT work due to bug in Watch struct
+	//if err := json.NewEncoder(w).Encode(event); err != nil {
+	//	http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
+	//	s.removeWatch(gvr, namespace, ch)
+	//	return
+	//}
 	data, err := json.Marshal(event.Object)
 	if err != nil {
 		return "", err
 	}
 	payload := fmt.Sprintf("{\"type\":\"%s\",\"object\":%s}", event.Type, string(data))
 	return payload, nil
+}
+
+func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) {
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+	if err := json.Unmarshal(data, obj); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+	}
+	ok = true
+	return
+}
+
+func GetObjectName(r *http.Request) cache.ObjectName {
+	namespace := getNamespace(r)
+	name := r.PathValue("name")
+	return cache.NewObjectName(namespace, name)
+}
+func GetObjectKey(r *http.Request) string {
+	return GetObjectName(r).String()
+}
+
+func FromAnySlice(anys []any) ([]runtime.Object, error) {
+	result := make([]runtime.Object, 0, len(anys))
+	for _, item := range anys {
+		obj, ok := item.(runtime.Object)
+		if !ok {
+			return nil, fmt.Errorf("element %T does not implement runtime.Object", item)
+		}
+		result = append(result, obj)
+	}
+	return result, nil
 }

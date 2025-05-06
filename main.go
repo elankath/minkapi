@@ -13,7 +13,7 @@ import (
 func main() {
 	server, err := core.NewKAPISimulator()
 	if err != nil {
-		klog.Fatalf("failed to initialize KAPISimulator: %v", err)
+		klog.Fatalf("failed to initialize Simulator: %v", err)
 	}
 	klog.Info("Kubernetes API Simulator running on :8080")
 
