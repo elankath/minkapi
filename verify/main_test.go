@@ -3,13 +3,20 @@ package verify
 
 import (
 	"context"
+	"fmt"
 	"github.com/elankath/kapisim/core/typeinfo"
+	corev1 "k8s.io/api/core/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"os"
 	"testing"
+	"time"
 )
 
 // TestMain should handle server setup/teardown for the test suite.
@@ -18,6 +25,18 @@ func TestMain(m *testing.M) {
 	code := m.Run() // Run tests
 	//TODO: shutdown kapisim server
 	os.Exit(code)
+}
+
+func TestListStorageClasses(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	ctx := context.Background()
+
+	scList, err := client.StorageV1().StorageClasses().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("error listing StorageClasses: %v", err)
+	}
+	t.Logf("Found %d StorageClasses", len(scList.Items))
 }
 
 func TestWatchStorageClasses(t *testing.T) {
@@ -31,6 +50,82 @@ func TestWatchStorageClasses(t *testing.T) {
 	}
 	listObjects(t, watcher)
 }
+func TestSharedInformerNode(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	factory := informers.NewSharedInformerFactory(client, 30*time.Second)
+	nodeInformer := factory.Core().V1().Nodes().Informer()
+	_, err := nodeInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			n := obj.(*corev1.Node)
+			t.Logf("[ADD] Node: %s\n", n.Name)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			newN := newObj.(*corev1.Node)
+			t.Logf("[UPDATE] Node: %s\n", newN.Name)
+		},
+		DeleteFunc: func(obj interface{}) {
+			n := obj.(*corev1.Node)
+			t.Logf("[DELETE] Node: %s\n", n.Name)
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to add handler for StorageClasses: %v", err)
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	// Start informers
+	factory.Start(stopCh)
+
+	// Wait for initial cache sync
+	if !cache.WaitForCacheSync(stopCh, nodeInformer.HasSynced) {
+		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		return
+	}
+
+	t.Logf("NodeInformer informer running...")
+	<-stopCh
+
+}
+func TestSharedInformerStorageClass(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	factory := informers.NewSharedInformerFactory(client, 30*time.Second)
+	storageInformer := factory.Storage().V1().StorageClasses().Informer()
+	_, err := storageInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			sc := obj.(*storagev1.StorageClass)
+			t.Logf("[ADD] StorageClass: %s\n", sc.Name)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			newSc := newObj.(*storagev1.StorageClass)
+			t.Logf("[UPDATE] StorageClass: %s\n", newSc.Name)
+		},
+		DeleteFunc: func(obj interface{}) {
+			sc := obj.(*storagev1.StorageClass)
+			t.Logf("[DELETE] StorageClass: %s\n", sc.Name)
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to add handler for StorageClasses: %v", err)
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	// Start informers
+	factory.Start(stopCh)
+
+	// Wait for initial cache sync
+	if !cache.WaitForCacheSync(stopCh, storageInformer.HasSynced) {
+		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		return
+	}
+
+	fmt.Println("StorageClass informer running...")
+	<-stopCh
+
+}
 
 func TestWatchNodes(t *testing.T) {
 	client := createKubeClient(t)
@@ -39,6 +134,30 @@ func TestWatchNodes(t *testing.T) {
 	watcher, err := client.CoreV1().Nodes().Watch(ctx, metav1.ListOptions{Watch: true})
 	if err != nil {
 		t.Fatalf("failed to create node watcher: %v", err)
+		return
+	}
+	listObjects(t, watcher)
+}
+
+func TestWatchStorageClass(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	ctx := context.Background()
+	watcher, err := client.StorageV1().StorageClasses().Watch(ctx, metav1.ListOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("failed to create sc watcher: %v", err)
+		return
+	}
+	listObjects(t, watcher)
+}
+
+func TestWatchCSIDrivers(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	ctx := context.Background()
+	watcher, err := client.StorageV1().CSIDrivers().Watch(ctx, metav1.ListOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("failed to create csidrver watcher: %v", err)
 		return
 	}
 	listObjects(t, watcher)

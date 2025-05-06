@@ -26,11 +26,14 @@ const (
 	NamespaceKind     KindName = "Namespace"
 	NamespaceListKind KindName = "NamespaceList"
 
+	NodeKind     KindName = "Node"
+	NodeListKind KindName = "NodeList"
+
 	PodKind     KindName = "Pod"
 	PodListKind KindName = "PodList"
 
-	NodeKind     KindName = "Node"
-	NodeListKind KindName = "NodeList"
+	ServiceKind     KindName = "Service"
+	ServiceListKind KindName = "ServiceList"
 
 	PriorityClassKind     KindName = "PriorityClass"
 	PriorityClassListKind KindName = "PriorityClassList"
@@ -56,8 +59,12 @@ const (
 	PodDisruptionBudgetKind     KindName = "PodDisruptionBudget"
 	PodDisruptionBudgetListKind KindName = "PodDisruptionBudgetList"
 
-	StorageClassKind           KindName = "StorageClass"
-	StorageClassListKind       KindName = "StorageClassList"
+	StorageClassKind     KindName = "StorageClass"
+	StorageClassListKind KindName = "StorageClassList"
+
+	CSIDriverKind     KindName = "CSIDriver"
+	CSIDriverListKind KindName = "CSIDriverList"
+
 	CSIStorageCapacityKind     KindName = "CSIStorageCapacity"
 	CSIStorageCapacityListKind KindName = "CSIStorageCapacityList"
 
@@ -91,6 +98,8 @@ var (
 	NodesDescriptor = NewDescriptor(NodeKind, NodeListKind, false, corev1.SchemeGroupVersion.WithResource("nodes"), "no")
 	PodsDescriptor  = NewDescriptor(PodKind, PodListKind, true, corev1.SchemeGroupVersion.WithResource("pods"), "po")
 
+	ServicesDescriptor = NewDescriptor(ServiceKind, ServiceListKind, true, corev1.SchemeGroupVersion.WithResource("services"), "svc")
+
 	PriorityClassesDescriptor = NewDescriptor(PriorityClassKind, PriorityClassListKind, false, schedulingv1.SchemeGroupVersion.WithResource("priorityclasses"))
 
 	LeaseDescriptor = NewDescriptor(LeaseKind, LeaseListKind, true, coordinationv1.SchemeGroupVersion.WithResource("leases"))
@@ -101,21 +110,23 @@ var (
 	ReplicaSetDescriptor          = NewDescriptor(ReplicaSetKind, ReplicaSetListKind, true, appsv1.SchemeGroupVersion.WithResource("replicasets"), "rs")
 	PodDisruptionBudgetDescriptor = NewDescriptor(PodDisruptionBudgetKind, PodDisruptionBudgetListKind, true, policyv1.SchemeGroupVersion.WithResource("poddisruptionbudgets"), "pdb")
 
-	StorageClassDescriptor       = NewDescriptor(StorageClassKind, StorageClassListKind, false, storagev1.SchemeGroupVersion.WithResource("storageclasses"), "sc")
+	StorageClassDescriptor = NewDescriptor(StorageClassKind, StorageClassListKind, false, storagev1.SchemeGroupVersion.WithResource("storageclasses"), "sc")
+
+	CSIDriverDescriptor          = NewDescriptor(CSIDriverKind, CSIDriverListKind, false, storagev1.SchemeGroupVersion.WithResource("csidrivers"))
 	CSIStorageCapacityDescriptor = NewDescriptor(CSIStorageCapacityKind, CSIStorageCapacityListKind, true, storagev1.SchemeGroupVersion.WithResource("csistoragecapacities"))
 
 	CSINodeDescriptor = NewDescriptor(CSINodeKind, CSINodeListKind, false, storagev1.SchemeGroupVersion.WithResource("csinodes"))
 
 	VolumeAttachmentDescriptor = NewDescriptor(VolumeAttachmentKind, VolumeAttachmentListKind, false, storagev1.SchemeGroupVersion.WithResource("volumeattachments"))
 
-	SupportedDescriptors = []Descriptor{NamespacesDescriptor, PodsDescriptor, NodesDescriptor,
+	SupportedDescriptors = []Descriptor{NamespacesDescriptor, NodesDescriptor, PodsDescriptor, ServicesDescriptor,
 		PriorityClassesDescriptor,
 		LeaseDescriptor,
 		EventsDescriptor,
 		RolesDescriptor,
 		DeploymentDescriptor, ReplicaSetDescriptor,
 		PodDisruptionBudgetDescriptor,
-		StorageClassDescriptor, CSIStorageCapacityDescriptor, CSINodeDescriptor, VolumeAttachmentDescriptor,
+		StorageClassDescriptor, CSIDriverDescriptor, CSIStorageCapacityDescriptor, CSINodeDescriptor, VolumeAttachmentDescriptor,
 	}
 
 	SupportedVerbs = []string{"create", "delete", "get", "list", "watch"}
@@ -144,6 +155,7 @@ var (
 			NamespacesDescriptor.APIResource,
 			NodesDescriptor.APIResource,
 			PodsDescriptor.APIResource,
+			ServicesDescriptor.APIResource,
 		},
 	}
 
@@ -196,6 +208,7 @@ var (
 			GroupVersion: storagev1.SchemeGroupVersion.String(),
 			APIResources: []metav1.APIResource{
 				StorageClassDescriptor.APIResource,
+				CSIDriverDescriptor.APIResource,
 				CSIStorageCapacityDescriptor.APIResource,
 				CSINodeDescriptor.APIResource,
 				VolumeAttachmentDescriptor.APIResource,

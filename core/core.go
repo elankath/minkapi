@@ -139,17 +139,15 @@ func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 	g := d.GVK.Group
 	r := d.GVR.Resource
 	if d.GVK.Group == "" {
-		if d.APIResource.Namespaced {
-			s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
-			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
-			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
-			s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
-		} else {
-			s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(typeinfo.NodesDescriptor))
-			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(typeinfo.NodesDescriptor))
-			s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(typeinfo.NodesDescriptor))
-			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(typeinfo.NodesDescriptor))
-		}
+		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
+		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
+
+		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(typeinfo.NodesDescriptor))
+		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(typeinfo.NodesDescriptor))
+		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(typeinfo.NodesDescriptor))
+		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(typeinfo.NodesDescriptor))
 	} else {
 		if d.APIResource.Namespaced {
 			s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
@@ -370,8 +368,8 @@ func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items [
 		return nil, fmt.Errorf("failed to get ListMeta field on %v", listObjVal)
 	}
 	typeMetaVal.Set(reflect.ValueOf(metav1.TypeMeta{
-		Kind:       d.GVK.Kind,
-		APIVersion: d.APIResource.Version,
+		Kind:       string(d.ListKind),
+		APIVersion: d.GVR.GroupVersion().String(),
 	}))
 	listMetaVal.Set(reflect.ValueOf(metav1.ListMeta{
 		ResourceVersion: currVersionStr,
@@ -431,6 +429,7 @@ func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 		}
 
 		ch := s.createWatchChan(d.GVR, namespace)
+		watchTimeout := 2 * time.Minute
 		for {
 			select {
 			case event := <-ch:
@@ -451,7 +450,7 @@ func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 				close(ch)
 				s.watchLock.Unlock()
 				return
-			case <-time.After(30 * time.Second):
+			case <-time.After(watchTimeout):
 				s.watchLock.Lock()
 				delete(s.watchers[d.GVR], namespace)
 				close(ch)
@@ -618,6 +617,7 @@ func getNamespace(r *http.Request) (ns string) {
 func getParseResourceVersion(w http.ResponseWriter, r *http.Request) (resourceVersion int64, ok bool) {
 	paramValue := r.URL.Query().Get("resourceVersion")
 	if paramValue == "" {
+		ok = true
 		resourceVersion = 0
 		return
 	}
@@ -652,7 +652,7 @@ func getFlusher(w http.ResponseWriter) http.Flusher {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return flusher
 	}
-	return nil
+	return flusher
 }
 func buildWatchEventJson(event *watch.Event) (string, error) {
 	// NOTE: Simple Json serialization does NOT work due to bug in Watch struct
@@ -663,6 +663,7 @@ func buildWatchEventJson(event *watch.Event) (string, error) {
 	//}
 	data, err := json.Marshal(event.Object)
 	if err != nil {
+		klog.Errorf("Failed to encode watch event: %v", err)
 		return "", err
 	}
 	payload := fmt.Sprintf("{\"type\":\"%s\",\"object\":%s}", event.Type, string(data))
