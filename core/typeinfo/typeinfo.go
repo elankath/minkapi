@@ -35,6 +35,14 @@ const (
 	ServiceKind     KindName = "Service"
 	ServiceListKind KindName = "ServiceList"
 
+	PersistentVolumeKind          KindName = "PersistentVolume"
+	PersistentVolumeListKind      KindName = "PersistentVolumeList"
+	PersistentVolumeClaimKind     KindName = "PersistentVolumeClaim"
+	PersistentVolumeClaimListKind KindName = "PersistentVolumeClaimList"
+
+	ReplicationControllerKind     KindName = "ReplicationController"
+	ReplicationControllerListKind KindName = "ReplicationControllerList"
+
 	PriorityClassKind     KindName = "PriorityClass"
 	PriorityClassListKind KindName = "PriorityClassList"
 
@@ -55,6 +63,9 @@ const (
 
 	ReplicaSetKind     KindName = "ReplicaSet"
 	ReplicaSetListKind KindName = "ReplicaSetList"
+
+	StatefulSetKind     KindName = "StatefulSet"
+	StatefulSetListKind KindName = "StatefulSetList"
 
 	PodDisruptionBudgetKind     KindName = "PodDisruptionBudget"
 	PodDisruptionBudgetListKind KindName = "PodDisruptionBudgetList"
@@ -98,9 +109,13 @@ var (
 	NodesDescriptor = NewDescriptor(NodeKind, NodeListKind, false, corev1.SchemeGroupVersion.WithResource("nodes"), "no")
 	PodsDescriptor  = NewDescriptor(PodKind, PodListKind, true, corev1.SchemeGroupVersion.WithResource("pods"), "po")
 
-	ServicesDescriptor = NewDescriptor(ServiceKind, ServiceListKind, true, corev1.SchemeGroupVersion.WithResource("services"), "svc")
+	ServicesDescriptor          = NewDescriptor(ServiceKind, ServiceListKind, true, corev1.SchemeGroupVersion.WithResource("services"), "svc")
+	PersistentVolumesDescriptor = NewDescriptor(PersistentVolumeKind, PersistentVolumeListKind, false, corev1.SchemeGroupVersion.WithResource("persistentvolumes"), "pv")
 
-	PriorityClassesDescriptor = NewDescriptor(PriorityClassKind, PriorityClassListKind, false, schedulingv1.SchemeGroupVersion.WithResource("priorityclasses"))
+	PersistentVolumeClaimsDescriptor = NewDescriptor(PersistentVolumeClaimKind, PersistentVolumeClaimListKind, true, corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), "pvc")
+
+	ReplicationControllersDescriptor = NewDescriptor(ReplicationControllerKind, ReplicationControllerListKind, true, corev1.SchemeGroupVersion.WithResource("replicationcontrollers"), "rc")
+	PriorityClassesDescriptor        = NewDescriptor(PriorityClassKind, PriorityClassListKind, false, schedulingv1.SchemeGroupVersion.WithResource("priorityclasses"))
 
 	LeaseDescriptor = NewDescriptor(LeaseKind, LeaseListKind, true, coordinationv1.SchemeGroupVersion.WithResource("leases"))
 
@@ -108,6 +123,7 @@ var (
 	RolesDescriptor               = NewDescriptor(RoleKind, RoleListKind, true, rbacv1.SchemeGroupVersion.WithResource("roles"))
 	DeploymentDescriptor          = NewDescriptor(DeploymentKind, DeploymentListKind, true, appsv1.SchemeGroupVersion.WithResource("deployments"), "deploy")
 	ReplicaSetDescriptor          = NewDescriptor(ReplicaSetKind, ReplicaSetListKind, true, appsv1.SchemeGroupVersion.WithResource("replicasets"), "rs")
+	StatefulSetDescriptor         = NewDescriptor(StatefulSetKind, StatefulSetListKind, true, appsv1.SchemeGroupVersion.WithResource("statefulsets"), "sts")
 	PodDisruptionBudgetDescriptor = NewDescriptor(PodDisruptionBudgetKind, PodDisruptionBudgetListKind, true, policyv1.SchemeGroupVersion.WithResource("poddisruptionbudgets"), "pdb")
 
 	StorageClassDescriptor = NewDescriptor(StorageClassKind, StorageClassListKind, false, storagev1.SchemeGroupVersion.WithResource("storageclasses"), "sc")
@@ -119,12 +135,13 @@ var (
 
 	VolumeAttachmentDescriptor = NewDescriptor(VolumeAttachmentKind, VolumeAttachmentListKind, false, storagev1.SchemeGroupVersion.WithResource("volumeattachments"))
 
-	SupportedDescriptors = []Descriptor{NamespacesDescriptor, NodesDescriptor, PodsDescriptor, ServicesDescriptor,
+	SupportedDescriptors = []Descriptor{
+		NamespacesDescriptor, NodesDescriptor, PodsDescriptor, ServicesDescriptor, PersistentVolumesDescriptor, PersistentVolumeClaimsDescriptor, ReplicationControllersDescriptor,
 		PriorityClassesDescriptor,
 		LeaseDescriptor,
 		EventsDescriptor,
 		RolesDescriptor,
-		DeploymentDescriptor, ReplicaSetDescriptor,
+		DeploymentDescriptor, ReplicaSetDescriptor, StatefulSetDescriptor,
 		PodDisruptionBudgetDescriptor,
 		StorageClassDescriptor, CSIDriverDescriptor, CSIStorageCapacityDescriptor, CSINodeDescriptor, VolumeAttachmentDescriptor,
 	}
@@ -156,6 +173,9 @@ var (
 			NodesDescriptor.APIResource,
 			PodsDescriptor.APIResource,
 			ServicesDescriptor.APIResource,
+			PersistentVolumesDescriptor.APIResource,
+			PersistentVolumeClaimsDescriptor.APIResource,
+			ReplicationControllersDescriptor.APIResource,
 		},
 	}
 
@@ -166,6 +186,7 @@ var (
 			APIResources: []metav1.APIResource{
 				DeploymentDescriptor.APIResource,
 				ReplicaSetDescriptor.APIResource,
+				StatefulSetDescriptor.APIResource,
 			},
 		},
 		{

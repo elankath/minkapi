@@ -106,7 +106,6 @@ func (s *Simulator) registerRoutes() {
 	s.mux.HandleFunc("GET /apis", s.handleAPIGroups)
 
 	// Core API Group and Other API Groups
-	// Legacy /api/v1 and /apis/%s/
 	s.registerAPIGroups()
 
 	for _, d := range typeinfo.SupportedDescriptors {
@@ -116,7 +115,6 @@ func (s *Simulator) registerRoutes() {
 }
 
 func (s *Simulator) registerAPIGroups() {
-	// API discovery
 
 	// Core API
 	s.mux.HandleFunc("GET /api/v1/", s.handleAPIResources(typeinfo.SupportedCoreAPIResourceList))
@@ -126,13 +124,6 @@ func (s *Simulator) registerAPIGroups() {
 		route := fmt.Sprintf("GET /apis/%s/", apiList.APIResources[0].Group)
 		s.mux.HandleFunc(route, s.handleAPIResources(apiList))
 	}
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", appsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedAppsAPIResourceList))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", coordinationv1.GroupName), s.handleAPIResources(&typeinfo.SupportedCoordinationAPIResourceList))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", eventsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedEventsAPIResourceList))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", rbacv1.GroupName), s.handleAPIResources(&typeinfo.SupportedRBACAPIResourceList))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", schedulingv1.GroupName), s.handleAPIResources(&typeinfo.SupportedSchedulingAPIResourceList))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", policyv1.GroupName), s.handleAPIResources(&typeinfo.SupportedPolicyAPIResourceList))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", storagev1.GroupName), s.handleAPIResources(&typeinfo.SupportedStorageAPIResourceList))
 }
 
 func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
@@ -144,22 +135,19 @@ func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
 		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
 
-		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(typeinfo.NodesDescriptor))
-		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(typeinfo.NodesDescriptor))
-		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(typeinfo.NodesDescriptor))
-		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(typeinfo.NodesDescriptor))
+		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(d))
+		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(d))
 	} else {
-		if d.APIResource.Namespaced {
-			s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
-			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
-			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleGet(d))
-			s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleDelete(d))
-		} else {
-			s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/%s", g, r), s.handleCreate(d))
-			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s", g, r), s.handleListOrWatch(d))
-			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s/{name}", g, r), s.handleGet(d))
-			s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/%s/{name}", g, r), s.handleDelete(d))
-		}
+		s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleGet(d))
+		s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleDelete(d))
+		s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/%s", g, r), s.handleCreate(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s", g, r), s.handleListOrWatch(d))
+		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s/{name}", g, r), s.handleGet(d))
+		s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/%s/{name}", g, r), s.handleDelete(d))
 	}
 }
 
@@ -348,10 +336,6 @@ func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 // createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
 // Consider using unstructured.Unstructured here for generic handling or reflection?
 func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
-	//listObj, err := typeinfo.SupportedScheme.New(d.ListGVK)
-	//if err != nil {
-	//	return nil, fmt.Errorf("failed to create new list object for %q due to %v", d.ListGVK, err)
-	//}
 	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
 	listType, ok := typesMap[string(d.ListKind)]
 	if !ok {
