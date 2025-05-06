@@ -5,8 +5,10 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	schedulingv1 "k8s.io/api/scheduling/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -50,6 +52,20 @@ const (
 
 	ReplicaSetKind     KindName = "ReplicaSet"
 	ReplicaSetListKind KindName = "ReplicaSetList"
+
+	PodDisruptionBudgetKind     KindName = "PodDisruptionBudget"
+	PodDisruptionBudgetListKind KindName = "PodDisruptionBudgetList"
+
+	StorageClassKind           KindName = "StorageClass"
+	StorageClassListKind       KindName = "StorageClassList"
+	CSIStorageCapacityKind     KindName = "CSIStorageCapacity"
+	CSIStorageCapacityListKind KindName = "CSIStorageCapacityList"
+
+	CSINodeKind     KindName = "CSINode"
+	CSINodeListKind KindName = "CSINodeList"
+
+	VolumeAttachmentKind     KindName = "VolumeAttachment"
+	VolumeAttachmentListKind KindName = "VolumeAttachmentList"
 )
 
 // Descriptor is an aggregate holder of various bits of type information on a given Kind
@@ -79,12 +95,28 @@ var (
 
 	LeaseDescriptor = NewDescriptor(LeaseKind, LeaseListKind, true, coordinationv1.SchemeGroupVersion.WithResource("leases"))
 
-	EventsDescriptor     = NewDescriptor(EventKind, EventListKind, true, eventsv1.SchemeGroupVersion.WithResource("events"), "ev")
-	RolesDescriptor      = NewDescriptor(RoleKind, RoleListKind, true, rbacv1.SchemeGroupVersion.WithResource("roles"))
-	DeploymentDescriptor = NewDescriptor(DeploymentKind, DeploymentListKind, true, appsv1.SchemeGroupVersion.WithResource("deployments"), "deploy")
-	ReplicaSetDescriptor = NewDescriptor(ReplicaSetKind, ReplicaSetListKind, true, appsv1.SchemeGroupVersion.WithResource("replicasets"), "rs")
+	EventsDescriptor              = NewDescriptor(EventKind, EventListKind, true, eventsv1.SchemeGroupVersion.WithResource("events"), "ev")
+	RolesDescriptor               = NewDescriptor(RoleKind, RoleListKind, true, rbacv1.SchemeGroupVersion.WithResource("roles"))
+	DeploymentDescriptor          = NewDescriptor(DeploymentKind, DeploymentListKind, true, appsv1.SchemeGroupVersion.WithResource("deployments"), "deploy")
+	ReplicaSetDescriptor          = NewDescriptor(ReplicaSetKind, ReplicaSetListKind, true, appsv1.SchemeGroupVersion.WithResource("replicasets"), "rs")
+	PodDisruptionBudgetDescriptor = NewDescriptor(PodDisruptionBudgetKind, PodDisruptionBudgetListKind, true, policyv1.SchemeGroupVersion.WithResource("poddisruptionbudgets"), "pdb")
 
-	SupportedDescriptors = []Descriptor{NamespacesDescriptor, PodsDescriptor, NodesDescriptor, PriorityClassesDescriptor, LeaseDescriptor, EventsDescriptor, RolesDescriptor, DeploymentDescriptor, ReplicaSetDescriptor}
+	StorageClassDescriptor       = NewDescriptor(StorageClassKind, StorageClassListKind, false, storagev1.SchemeGroupVersion.WithResource("storageclasses"), "sc")
+	CSIStorageCapacityDescriptor = NewDescriptor(CSIStorageCapacityKind, CSIStorageCapacityListKind, true, storagev1.SchemeGroupVersion.WithResource("csistoragecapacities"))
+
+	CSINodeDescriptor = NewDescriptor(CSINodeKind, CSINodeListKind, false, storagev1.SchemeGroupVersion.WithResource("csinodes"))
+
+	VolumeAttachmentDescriptor = NewDescriptor(VolumeAttachmentKind, VolumeAttachmentListKind, false, storagev1.SchemeGroupVersion.WithResource("volumeattachments"))
+
+	SupportedDescriptors = []Descriptor{NamespacesDescriptor, PodsDescriptor, NodesDescriptor,
+		PriorityClassesDescriptor,
+		LeaseDescriptor,
+		EventsDescriptor,
+		RolesDescriptor,
+		DeploymentDescriptor, ReplicaSetDescriptor,
+		PodDisruptionBudgetDescriptor,
+		StorageClassDescriptor, CSIStorageCapacityDescriptor, CSINodeDescriptor, VolumeAttachmentDescriptor,
+	}
 
 	SupportedVerbs = []string{"create", "delete", "get", "list", "watch"}
 
@@ -113,100 +145,61 @@ var (
 			NodesDescriptor.APIResource,
 			PodsDescriptor.APIResource,
 		},
-		//APIResources: []metav1.APIResource{
-		//	{
-		//		Name:               "namespaces",
-		//		SingularName:       "namespace",
-		//		ShortNames:         []string{"ns"},
-		//		Kind:               "Namespace",
-		//		Namespaced:         false,
-		//		Verbs:              SupportedVerbs,
-		//		StorageVersionHash: "ns111",
-		//	},
-		//	{
-		//		Name:               "pods",
-		//		SingularName:       "pod",
-		//		ShortNames:         []string{"po"},
-		//		Kind:               "Pod",
-		//		Namespaced:         true,
-		//		Verbs:              SupportedVerbs,
-		//		Categories:         []string{"all"},
-		//		StorageVersionHash: "pod111",
-		//	},
-		//	{
-		//		Name:               "nodes",
-		//		SingularName:       "node",
-		//		ShortNames:         []string{"no"},
-		//		Kind:               "Node",
-		//		Namespaced:         false,
-		//		Verbs:              SupportedVerbs,
-		//		Categories:         []string{"all"},
-		//		StorageVersionHash: "node111",
-		//	},
 	}
 
-	SupportedAppsAPIResourceList = metav1.APIResourceList{
-		TypeMeta:     metaV1APIResourceList,
-		GroupVersion: appsv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			DeploymentDescriptor.APIResource,
-			ReplicaSetDescriptor.APIResource,
+	SupportedGroupAPIResourceLists = []metav1.APIResourceList{
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: appsv1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				DeploymentDescriptor.APIResource,
+				ReplicaSetDescriptor.APIResource,
+			},
 		},
-		//APIResources: []metav1.APIResource{
-		//	{
-		//		Name:       "deployments",
-		//		ShortNames: []string{"deploy"},
-		//		Kind:       "Deployment",
-		//		Namespaced: true,
-		//		Verbs:      SupportedVerbs,
-		//	},
-		//	{
-		//		Name:       "replicasets",
-		//		ShortNames: []string{"rs"},
-		//		Kind:       "ReplicaSet",
-		//		Namespaced: true,
-		//		Verbs:      SupportedVerbs,
-		//	},
-		//},
-	}
-	SupportedCoordinationAPIResourceList = metav1.APIResourceList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIResourceList",
-			APIVersion: "v1",
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: coordinationv1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				LeaseDescriptor.APIResource,
+			},
 		},
-		GroupVersion: coordinationv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			LeaseDescriptor.APIResource,
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: eventsv1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				EventsDescriptor.APIResource,
+			},
 		},
-	}
-
-	SupportedEventsAPIResourceList = metav1.APIResourceList{
-		TypeMeta:     metaV1APIResourceList,
-		GroupVersion: eventsv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			EventsDescriptor.APIResource,
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: rbacv1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				RolesDescriptor.APIResource,
+			},
 		},
-	}
-
-	SupportedRBACAPIResourceList = metav1.APIResourceList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIResourceList",
-			APIVersion: "v1",
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: schedulingv1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				PriorityClassesDescriptor.APIResource,
+			},
 		},
-		GroupVersion: rbacv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			RolesDescriptor.APIResource,
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: policyv1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				PodDisruptionBudgetDescriptor.APIResource,
+			},
 		},
-	}
-
-	SupportedSchedulingAPIResourceList = metav1.APIResourceList{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "APIResourceList",
-			APIVersion: "v1",
-		},
-		GroupVersion: schedulingv1.SchemeGroupVersion.String(),
-		APIResources: []metav1.APIResource{
-			PriorityClassesDescriptor.APIResource,
+		{
+			TypeMeta:     metaV1APIResourceList,
+			GroupVersion: storagev1.SchemeGroupVersion.String(),
+			APIResources: []metav1.APIResource{
+				StorageClassDescriptor.APIResource,
+				CSIStorageCapacityDescriptor.APIResource,
+				CSINodeDescriptor.APIResource,
+				VolumeAttachmentDescriptor.APIResource,
+			},
 		},
 	}
 )
@@ -220,14 +213,14 @@ var (
 		eventsv1.AddToScheme,
 		rbacv1.AddToScheme,
 		schedulingv1.AddToScheme,
+		policyv1.AddToScheme,
+		storagev1.AddToScheme,
 	}
 
 	metaV1APIResourceList = metav1.TypeMeta{
 		Kind:       "APIResourceList",
 		APIVersion: "v1",
 	}
-	//resourceTypeCache   = buildResourceTypeCache()
-
 )
 
 func RegisterSchemes() (scheme *runtime.Scheme) {
@@ -267,19 +260,13 @@ func buildAPIGroupList() metav1.APIGroupList {
 }
 
 func NewDescriptor(kind KindName, listKind KindName, namespaced bool, gvr schema.GroupVersionResource, shortNames ...string) Descriptor {
-	//listType := reflect.TypeOf(objListTemplate)
-	//objType := reflect.TypeOf(objTemplate)
-	//return Descriptor{
-	//	GVR:             gvr,
-	//	ObjTemplate:     objTemplate,
-	//	ObjListTemplate: objListTemplate,
-	//	ObjType:         objType,
-	//	ObjListType:     listType,
-	//	ItemsSliceType:  reflect.SliceOf(objType),
-	//}
 	var singularName string
-	if strings.HasPrefix(gvr.Resource, "sses") {
+
+	// please pardon the hack below
+	if strings.HasSuffix(gvr.Resource, "sses") { // Ex: priorityclasses
 		singularName = strings.TrimSuffix(gvr.Resource, "es")
+	} else if strings.HasSuffix(gvr.Resource, "ties") { // Ex: csistoragecapacities
+		singularName = strings.TrimSuffix(gvr.Resource, "ties") + "ty"
 	} else {
 		singularName = strings.TrimSuffix(gvr.Resource, "s")
 	}

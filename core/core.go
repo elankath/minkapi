@@ -5,11 +5,6 @@ import (
 	"fmt"
 	"github.com/elankath/kapisim/core/typeinfo"
 	"io"
-	appsv1 "k8s.io/api/apps/v1"
-	coordinationv1 "k8s.io/api/coordination/v1"
-	eventsv1 "k8s.io/api/events/v1"
-	rbacv1 "k8s.io/api/rbac/v1"
-	schedulingv1 "k8s.io/api/scheduling/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -90,108 +85,84 @@ func (s *Simulator) closeWatches() {
 	return
 }
 
-func (s *Simulator) registerRoutesForDescriptor(d typeinfo.Descriptor) {
-	var resPath string
-	if d.GVK.Group == "" {
-		resPath = "/api/v1/" + d.GVR.Resource
-	}
-	//Example: Core Path Pattern: "POST|GET /api/v1/namespaces"
-	//Example: Core Path Pattern: "GET|DELETE /api/v1/namespaces/{name}"
-	s.mux.HandleFunc(fmt.Sprintf("POST %s", resPath), s.handleCreate(typeinfo.NamespacesDescriptor))
-	s.mux.HandleFunc(fmt.Sprintf("GET %s", resPath), s.handleListOrWatch(typeinfo.NamespacesDescriptor))
-	//// Core v1: Namespaces
-	//s.mux.HandleFunc("POST /api/v1/namespaces", s.handleCreate(typeinfo.NamespacesDescriptor))
-	//s.mux.HandleFunc("GET /api/v1/namespaces", s.handleListOrWatch(GVRNamespaces))
-	//s.mux.HandleFunc("GET /api/v1/namespaces/{name}", s.handleGet(GVRNamespaces))
-	//s.mux.HandleFunc("DELETE /api/v1/namespaces/{name}", s.handleDelete(GVRNamespaces))
-}
+//func (s *Simulator) registerRoutesForDescriptor(d typeinfo.Descriptor) {
+//	var resPath string
+//	if d.GVK.Group == "" {
+//		resPath = "/api/v1/" + d.GVR.Resource
+//	}
+//	//Example: Core Path Pattern: "POST|GET /api/v1/namespaces"
+//	//Example: Core Path Pattern: "GET|DELETE /api/v1/namespaces/{name}"
+//	s.mux.HandleFunc(fmt.Sprintf("POST %s", resPath), s.handleCreate(typeinfo.NamespacesDescriptor))
+//	s.mux.HandleFunc(fmt.Sprintf("GET %s", resPath), s.handleListOrWatch(typeinfo.NamespacesDescriptor))
+//	//// Core v1: Namespaces
+//	//s.mux.HandleFunc("POST /api/v1/namespaces", s.handleCreate(typeinfo.NamespacesDescriptor))
+//	//s.mux.HandleFunc("GET /api/v1/namespaces", s.handleListOrWatch(GVRNamespaces))
+//	//s.mux.HandleFunc("GET /api/v1/namespaces/{name}", s.handleGet(GVRNamespaces))
+//	//s.mux.HandleFunc("DELETE /api/v1/namespaces/{name}", s.handleDelete(GVRNamespaces))
+//}
 
 func (s *Simulator) registerRoutes() {
-	// API discovery
 	s.mux.HandleFunc("GET /api", s.handleAPIVersions)
 	s.mux.HandleFunc("GET /apis", s.handleAPIGroups)
-	//s.mux.HandleFunc("GET /api/v1", s.handleCoreAPIResources)
-	s.mux.HandleFunc("GET /api/v1/", s.handleAPIResources(&typeinfo.SupportedCoreAPIResourceList))
 
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", appsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedAppsAPIResourceList))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", coordinationv1.GroupName), s.handleAPIResources(&typeinfo.SupportedCoordinationAPIResourceList))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", eventsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedEventsAPIResourceList))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", rbacv1.GroupName), s.handleAPIResources(&typeinfo.SupportedRBACAPIResourceList))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", schedulingv1.GroupName), s.handleAPIResources(&typeinfo.SupportedSchedulingAPIResourceList))
+	// Core API Group and Other API Groups
+	// Legacy /api/v1 and /apis/%s/
+	s.registerAPIGroups()
 
-	// Core v1: Nodes
-	s.registerCoreResourceRoutes(typeinfo.NodesDescriptor)
+	for _, d := range typeinfo.SupportedDescriptors {
+		s.registerResourceRoutes(d)
+	}
 
-	// Core v1: Pods
-	s.registerCoreNamespacedResourceRoutes(typeinfo.PodsDescriptor)
-
-	// Scheduling v1: PriorityClasses
-	s.registerGroupNamespacedResourceRoutes(typeinfo.PriorityClassesDescriptor)
-	//s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleCreate(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClass{} }))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleListOrWatch(GVRPriorityClasses, func() runtime.Object { return &schedulingv1.PriorityClassList{} }))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleGet(GVRPriorityClasses))
-	//s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", schedulingv1.GroupName, GVRPriorityClasses.Resource), s.handleDelete(GVRPriorityClasses))
-
-	// Apps v1: Deployments
-	s.registerGroupNamespacedResourceRoutes(typeinfo.DeploymentDescriptor)
-	//s.mux.HandleFunc("POST /apis/apps/v1/namespaces/{namespace}/deployments", s.handleCreate(GVRDeployments, func() runtime.Object { return &appsv1.Deployment{} }))
-	//s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleGet(GVRDeployments))
-	//s.mux.HandleFunc("GET /apis/apps/v1/namespaces/{namespace}/deployments", s.handleListOrWatch(GVRDeployments, func() runtime.Object { return &appsv1.DeploymentList{} }))
-	//s.mux.HandleFunc("DELETE /apis/apps/v1/namespaces/{namespace}/deployments/{name}", s.handleDelete(GVRDeployments))
-
-	// Coordination v1: Leases
-	s.registerGroupNamespacedResourceRoutes(typeinfo.LeaseDescriptor)
-	//s.mux.HandleFunc("POST /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleCreate(GVRLeases, func() runtime.Object { return &coordinationv1.Lease{} }))
-	//s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleGet(GVRLeases))
-	//s.mux.HandleFunc("GET /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases", s.handleListOrWatch(GVRLeases, func() runtime.Object { return &coordinationv1.LeaseList{} }))
-	//s.mux.HandleFunc("DELETE /apis/coordination.k8s.io/v1/namespaces/{namespace}/leases/{name}", s.handleDelete(GVRLeases))
-
-	// Events v1: Events
-	s.registerGroupNamespacedResourceRoutes(typeinfo.EventsDescriptor)
-	//s.mux.HandleFunc("POST /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleCreate(GVREvents, func() runtime.Object { return &eventsv1.Event{} }))
-	//s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleGet(GVREvents))
-	//s.mux.HandleFunc("GET /apis/events.k8s.io/v1/namespaces/{namespace}/events", s.handleListOrWatch(GVREvents, func() runtime.Object { return &eventsv1.EventList{} }))
-	//s.mux.HandleFunc("DELETE /apis/events.k8s.io/v1/namespaces/{namespace}/events/{name}", s.handleDelete(GVREvents))
-
-	// RBAC v1: Roles
-	s.registerGroupNamespacedResourceRoutes(typeinfo.RolesDescriptor)
-	//s.mux.HandleFunc("POST /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleCreate(GVRRoles, func() runtime.Object { return &rbacv1.Role{} }))
-	//s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleGet(GVRRoles))
-	//s.mux.HandleFunc("GET /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles", s.handleListOrWatch(GVRRoles, func() runtime.Object { return &rbacv1.RoleList{} }))
-	//s.mux.HandleFunc("DELETE /apis/rbac.authorization.k8s.io/v1/namespaces/{namespace}/roles/{name}", s.handleDelete(GVRRoles))
 }
 
-func (s *Simulator) registerCoreResourceRoutes(d typeinfo.Descriptor) {
-	r := d.GVR.Resource
-	s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(typeinfo.NodesDescriptor))
-	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(typeinfo.NodesDescriptor))
-	s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(typeinfo.NodesDescriptor))
-	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(typeinfo.NodesDescriptor))
-	//s.mux.HandleFunc("POST /api/v1/nodes", s.handleCreate(typeinfo.NodesDescriptor))
-	//s.mux.HandleFunc("GET /api/v1/nodes", s.handleListOrWatch(typeinfo.NodesDescriptor))
-	//s.mux.HandleFunc("DELETE /api/v1/nodes/{name}", s.handleDelete(typeinfo.NodesDescriptor))
-	//s.mux.HandleFunc("GET /api/v1/nodes/{name}", s.handleGet(typeinfo.NodesDescriptor))
-}
-func (s *Simulator) registerCoreNamespacedResourceRoutes(d typeinfo.Descriptor) {
-	r := d.GVR.Resource
-	s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
-	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
-	s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
-	s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
+func (s *Simulator) registerAPIGroups() {
+	// API discovery
+
+	// Core API
+	s.mux.HandleFunc("GET /api/v1/", s.handleAPIResources(typeinfo.SupportedCoreAPIResourceList))
+
+	// API groups
+	for _, apiList := range typeinfo.SupportedGroupAPIResourceLists {
+		route := fmt.Sprintf("GET /apis/%s/", apiList.APIResources[0].Group)
+		s.mux.HandleFunc(route, s.handleAPIResources(apiList))
+	}
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", appsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedAppsAPIResourceList))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", coordinationv1.GroupName), s.handleAPIResources(&typeinfo.SupportedCoordinationAPIResourceList))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", eventsv1.GroupName), s.handleAPIResources(&typeinfo.SupportedEventsAPIResourceList))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", rbacv1.GroupName), s.handleAPIResources(&typeinfo.SupportedRBACAPIResourceList))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", schedulingv1.GroupName), s.handleAPIResources(&typeinfo.SupportedSchedulingAPIResourceList))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", policyv1.GroupName), s.handleAPIResources(&typeinfo.SupportedPolicyAPIResourceList))
+	//s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/", storagev1.GroupName), s.handleAPIResources(&typeinfo.SupportedStorageAPIResourceList))
 }
 
-func (s *Simulator) registerGroupNamespacedResourceRoutes(d typeinfo.Descriptor) {
+func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 	g := d.GVK.Group
 	r := d.GVR.Resource
-	//s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
-	//s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
-	//s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}",r), s.handleDelete(d))
-
-	s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
-	s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleGet(d))
-	s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleDelete(d))
+	if d.GVK.Group == "" {
+		if d.APIResource.Namespaced {
+			s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
+			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
+			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
+			s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
+		} else {
+			s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(typeinfo.NodesDescriptor))
+			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(typeinfo.NodesDescriptor))
+			s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(typeinfo.NodesDescriptor))
+			s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(typeinfo.NodesDescriptor))
+		}
+	} else {
+		if d.APIResource.Namespaced {
+			s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
+			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
+			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleGet(d))
+			s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleDelete(d))
+		} else {
+			s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/%s", g, r), s.handleCreate(d))
+			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s", g, r), s.handleListOrWatch(d))
+			s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s/{name}", g, r), s.handleGet(d))
+			s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/%s/{name}", g, r), s.handleDelete(d))
+		}
+	}
 }
 
 // handleAPIGroups returns the list of supported API groups
@@ -212,7 +183,7 @@ func (s *Simulator) handleAPIVersions(w http.ResponseWriter, r *http.Request) {
 	writeJsonResponse(w, r, &typeinfo.SupportedAPIVersions)
 }
 
-func (s *Simulator) handleAPIResources(apiResourceList *metav1.APIResourceList) http.HandlerFunc {
+func (s *Simulator) handleAPIResources(apiResourceList metav1.APIResourceList) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -427,94 +398,6 @@ func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items [
 	listObj := ptr.Interface().(runtime.Object)
 	return listObj, nil
 }
-
-// createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
-// Consider using unstructured.Unstructured here for generic handling or reflection?
-//func createListOld(version string, items []any, namespace string, newListFn func() runtime.Object) runtime.Object {
-//	list := newListFn()
-//	list.DeepCopyObject()
-//	switch list := list.(type) {
-//	case *corev1.PodList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "PodList", APIVersion: GVRPods.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
-//		list.Items = make([]corev1.Pod, 0, len(items))
-//		for _, item := range items {
-//			pod := item.(*corev1.Pod)
-//			if pod.Namespace == namespace {
-//				list.Items = append(list.Items, *pod)
-//			}
-//			pod.Status.Phase = corev1.PodPending
-//		}
-//	case *corev1.NamespaceList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "NamespaceList", APIVersion: GVRNamespaces.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
-//		list.Items = make([]corev1.Namespace, 0, len(items))
-//		for _, item := range items {
-//			ns := item.(*corev1.Namespace)
-//			list.Items = append(list.Items, *ns)
-//		}
-//	case *corev1.NodeList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "NodeList", APIVersion: GVRNodes.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
-//		list.Items = make([]corev1.Node, 0, len(items))
-//		for _, item := range items {
-//			node := item.(*corev1.Node)
-//			list.Items = append(list.Items, *node)
-//			node.Status.Phase = corev1.NodeRunning
-//		}
-//	case *appsv1.DeploymentList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "DeploymentList", APIVersion: GVRDeployments.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
-//		list.Items = make([]appsv1.Deployment, 0, len(items))
-//		for _, item := range items {
-//			deploy := item.(*appsv1.Deployment)
-//			if deploy.Namespace == namespace {
-//				list.Items = append(list.Items, *deploy)
-//			}
-//		}
-//	case *coordinationv1.LeaseList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "LeaseList", APIVersion: GVRLeases.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
-//		list.Items = make([]coordinationv1.Lease, 0, len(items))
-//		for _, item := range items {
-//			lease := item.(*coordinationv1.Lease)
-//			if lease.Namespace == namespace {
-//				list.Items = append(list.Items, *lease)
-//			}
-//		}
-//	case *eventsv1.EventList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "EventList", APIVersion: GVREvents.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: version}
-//		list.Items = make([]eventsv1.Event, 0, len(items))
-//		for _, item := range items {
-//			event := item.(*eventsv1.Event)
-//			if event.Namespace == namespace {
-//				list.Items = append(list.Items, *event)
-//			}
-//		}
-//	case *rbacv1.RoleList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "RoleList", APIVersion: GVRRoles.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
-//		list.Items = make([]rbacv1.Role, 0, len(items))
-//		for _, item := range items {
-//			role := item.(*rbacv1.Role)
-//			if role.Namespace == namespace {
-//				list.Items = append(list.Items, *role)
-//			}
-//		}
-//	case *schedulingv1.PriorityClassList:
-//		list.TypeMeta = metav1.TypeMeta{Kind: "PriorityClassList", APIVersion: GVRPriorityClasses.GroupVersion().String()}
-//		list.ListMeta = metav1.ListMeta{ResourceVersion: "rbac.authorization.k8s.io/v1"}
-//		list.Items = make([]schedulingv1.PriorityClass, 0, len(items))
-//		for _, item := range items {
-//			pc := item.(*schedulingv1.PriorityClass)
-//			if pc.Namespace == namespace {
-//				list.Items = append(list.Items, *pc)
-//			}
-//		}
-//	}
-//	return list
-//}
 
 func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
