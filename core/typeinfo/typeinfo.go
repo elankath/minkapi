@@ -345,6 +345,9 @@ func (d Descriptor) CreateObject() (obj metav1.Object, err error) {
 	obj = runtimeObj.(metav1.Object)
 	return
 }
+func (d Descriptor) Resource() string {
+	return d.GVR.Resource
+}
 
 func GenerateName(base string) string {
 	const suffixLen = 5

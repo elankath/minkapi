@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/elankath/kapisim/core/podutil"
 	"github.com/elankath/kapisim/core/typeinfo"
 	"io"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -123,6 +125,10 @@ func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 		s.mux.HandleFunc(fmt.Sprintf("PATCH /api/v1/namespaces/{namespace}/%s/{name}/status", r), s.handlePatchStatus(d))
 		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
 
+		if d.Kind == typeinfo.PodsDescriptor.Kind {
+			s.mux.HandleFunc("POST /api/v1/namespaces/{namespace}/pods/{name}/binding", s.handleCreatePodBinding)
+		}
+
 		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(d))
 		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(d))
@@ -171,7 +177,7 @@ func (s *Simulator) handleAPIResources(apiResourceList metav1.APIResourceList) h
 
 func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(descriptor.GVR, w, r)
+		store := s.getStoreOrWriteError(descriptor.GVR, w)
 		if store == nil {
 			return
 		}
@@ -219,19 +225,18 @@ func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFun
 
 func (s *Simulator) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w, r)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
-
 		key := GetObjectKey(r)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
 			return
 		}
 		if !exists {
-			http.Error(w, "Not Found", http.StatusNotFound)
+			handleNotFound(w, r, d.GVR, key)
 			return
 		}
 		writeJsonResponse(w, r, obj)
@@ -240,7 +245,7 @@ func (s *Simulator) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 
 func (s *Simulator) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w, r)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
@@ -303,11 +308,10 @@ func (s *Simulator) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc {
 }
 func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w, r)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
-		namespace := getNamespace(r)
 		items := store.List()
 		currentVersionStr := fmt.Sprintf("%d", s.getCurrentVersion(d.GVR))
 		objItems, err := FromAnySlice(items)
@@ -316,7 +320,7 @@ func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 			writeStatusError(w, r, statusErr)
 			return
 		}
-		list, err := createList(d, namespace, currentVersionStr, objItems)
+		list, err := createList(d, currentVersionStr, objItems)
 		if err != nil {
 			statusErr := apierrors.NewInternalError(err)
 			writeStatusError(w, r, statusErr)
@@ -327,7 +331,7 @@ func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 }
 func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w, r)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
@@ -372,7 +376,7 @@ func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 }
 func (s *Simulator) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w, r)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
@@ -421,7 +425,7 @@ func (s *Simulator) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
 
 func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w, r)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
@@ -481,6 +485,54 @@ func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 			}
 		}
 	}
+}
+
+// handleCreatePodBinding is meant to handle creation for a Pod binding.
+// Ex: POST http://localhost:8080/api/v1/namespaces/default/pods/a-mc6zl/binding
+// This endpoint is invoked by the scheduler and it is expected that the API Server sets the `pod.Spec.NodeName`
+//
+// Example Payload
+// {"kind":"Binding","apiVersion":"v1","metadata":{"name":"a-p4r2l","namespace":"default","uid":"b8124ee8-a0c7-4069-930d-fc5e901675d3"},"target":{"kind":"Node","name":"a-kl827"}}
+func (s *Simulator) handleCreatePodBinding(w http.ResponseWriter, r *http.Request) {
+	d := typeinfo.PodsDescriptor
+	store := s.getStoreOrWriteError(d.GVR, w)
+	if store == nil {
+		return
+	}
+	binding := corev1.Binding{}
+	if !readBodyIntoObj(w, r, &binding) {
+		return
+	}
+	key := GetObjectKey(r)
+	obj, exists, err := store.GetByKey(key)
+	if err != nil {
+		handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
+		return
+	}
+	if !exists {
+		handleNotFound(w, r, d.GVR, key)
+		return
+	}
+	pod := obj.(*corev1.Pod)
+	pod.Spec.NodeName = binding.Target.Name
+	podutil.UpdatePodCondition(&pod.Status, &corev1.PodCondition{
+		Type:   corev1.PodScheduled,
+		Status: corev1.ConditionTrue,
+	})
+	klog.Infof("assigned pod %s to node %s", pod.Name, pod.Spec.NodeName)
+	err = store.Update(obj)
+	if err != nil {
+		err = fmt.Errorf("cannot update object %q in store: %w", key, err)
+		handleInternalServerError(w, r, err)
+		return
+	}
+	// Return {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
+	statusOK := &metav1.Status{
+		TypeMeta: metav1.TypeMeta{Kind: "Status"},
+		Status:   metav1.StatusSuccess,
+		Code:     http.StatusCreated,
+	}
+	writeJsonResponse(w, r, statusOK)
 }
 
 func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace string, startVersion int64, items []any) (ok bool) {
@@ -584,7 +636,7 @@ func (s *Simulator) getStore(gvr schema.GroupVersionResource) cache.Store {
 	return s.stores[gvr]
 }
 
-func (s *Simulator) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter, r *http.Request) (store cache.Store) {
+func (s *Simulator) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter) (store cache.Store) {
 	store = s.getStore(gvr)
 	if store == nil {
 		http.Error(w, "Resource not supported", http.StatusNotFound)
@@ -608,7 +660,7 @@ func (s *Simulator) currResourceVersion(gvr schema.GroupVersionResource) string 
 
 // createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
 // Consider using unstructured.Unstructured here for generic handling or reflection?
-func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
+func createList(d typeinfo.Descriptor, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
 	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
 	listType, ok := typesMap[string(d.ListKind)]
 	if !ok {
@@ -748,6 +800,14 @@ func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error
 	klog.Error(err)
 	statusErr := apierrors.NewInternalError(err)
 	w.WriteHeader(http.StatusInternalServerError)
+	w.Header().Set("Content-Type", "application/json")
+	writeJsonResponse(w, r, statusErr.ErrStatus)
+}
+
+func handleNotFound(w http.ResponseWriter, r *http.Request, gr schema.GroupVersionResource, key string) {
+	klog.Error("cannot find object with key %q of resource %q", key, gr.Resource)
+	statusErr := apierrors.NewNotFound(gr.GroupResource(), key)
+	w.WriteHeader(http.StatusNotFound)
 	w.Header().Set("Content-Type", "application/json")
 	writeJsonResponse(w, r, statusErr.ErrStatus)
 }
