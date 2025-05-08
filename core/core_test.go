@@ -3,6 +3,7 @@ package core
 import (
 	"github.com/elankath/kapisim/core/typeinfo"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"os"
@@ -52,6 +53,27 @@ func TestPatchPodStatus(t *testing.T) {
 		t.Errorf("Failed to set pod conditions")
 	}
 }
+func TestPatchEvent(t *testing.T) {
+	data := readFile(t, "testdata/event-a.json")
+	if data == nil {
+		return
+	}
+	obj, err := typeinfo.EventsDescriptor.CreateObject()
+	if err != nil {
+		t.Errorf("Failed to create event: %v", err)
+		return
+	}
+	event := obj.(*eventsv1.Event)
+	err = patchObject(obj.(runtime.Object), "default/a-bingo.aaabbb", []byte(patchEventSeries))
+	if err != nil {
+		t.Errorf("Failed to patch evnt: %v", err)
+		return
+	}
+	t.Logf("Patched event series: %v", event)
+	if event.Series == nil {
+		t.Errorf("Failed to patch event series")
+	}
+}
 
 func readFile(t *testing.T, path string) []byte {
 	t.Helper()
@@ -74,6 +96,15 @@ var patchPodCond = `
       "status" : "False",
       "type" : "PodScheduled"
     } ]
+  }
+}
+`
+
+var patchEventSeries = `
+{
+  "series": {
+    "count": 2,
+    "lastObservedTime": "2025-05-08T09:05:57.028064Z"
   }
 }
 `

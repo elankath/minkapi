@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/elankath/kapisim/core/typeinfo"
-	jsonpatch "github.com/evanphx/json-patch/v5"
 	"io"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -132,7 +131,9 @@ func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 		s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleGet(d))
+		s.mux.HandleFunc(fmt.Sprintf("PATCH /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handlePatch(d))
 		s.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), s.handleDelete(d))
+
 		s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/%s", g, r), s.handleCreate(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s", g, r), s.handleListOrWatch(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s/{name}", g, r), s.handleGet(d))
@@ -330,7 +331,6 @@ func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 		if store == nil {
 			return
 		}
-
 		key := GetObjectKey(r)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
@@ -342,9 +342,9 @@ func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 			return
 		}
 		contentType := r.Header.Get("Content-Type")
-		if contentType != "application/json-patch+json" && contentType != "application/merge-patch+json" {
-			statusErr := apierrors.NewBadRequest(fmt.Sprintf("Content type %s is not supported", contentType)) // TODO: unsure whether status code here is right.
-			writeStatusError(w, r, statusErr)
+		if contentType != "application/strategic-merge-patch+json" {
+			err = fmt.Errorf("unsupported content type %q for obj %q", contentType, key)
+			handleInternalServerError(w, r, err)
 			return
 		}
 		patchData, err := io.ReadAll(r.Body)
@@ -353,57 +353,21 @@ func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 			writeStatusError(w, r, statusErr)
 			return
 		}
-		oldJSON, err := kjson.Marshal(obj)
+		err = patchObject(obj.(runtime.Object), key, patchData)
 		if err != nil {
-			statusErr := apierrors.NewInternalError(fmt.Errorf("failed to serialize obj for key %q: %w", key, err))
-			writeStatusError(w, r, statusErr)
-			return
-		}
-		var newJSON []byte
-		switch contentType {
-		case "application/merge-patch+json":
-			newJSON, err = jsonpatch.MergePatch(oldJSON, patchData)
-			if err != nil {
-				err = fmt.Errorf("failed to merge patch data for obj %q: %w", key, err)
-				handleInternalServerError(w, r, err)
-				return
-			}
-		case "application/json-patch+json":
-			var patch jsonpatch.Patch
-			patch, err = jsonpatch.DecodePatch(patchData)
-			if err != nil {
-				err = fmt.Errorf("failed to decode patch data for obj %q: %w", key, err)
-				handleInternalServerError(w, r, err)
-				return
-			}
-			newJSON, err = patch.Apply(oldJSON)
-			if err != nil {
-				err = fmt.Errorf("failed to merge patch data for obj %q: %w", key, err)
-				handleInternalServerError(w, r, err)
-				return
-			}
-		}
-		// Deserialize back to Pod
-		updatedObj, err := d.CreateObject()
-		err = json.Unmarshal(newJSON, updatedObj)
-		if err != nil {
-			err = fmt.Errorf("failed to deserialize merged obj %q: %w", key, err)
+			err = fmt.Errorf("failed to atch obj %q: %w", key, err)
 			handleInternalServerError(w, r, err)
 			return
 		}
 		metaObj := obj.(metav1.Object)
-		name := metaObj.GetName()
-		updatedObj.SetName(name)
-		updatedObj.SetNamespace(metaObj.GetNamespace())
-		updatedObj.SetResourceVersion(s.nextResourceVersion(d.GVR))
-
-		err = store.Update(updatedObj)
+		metaObj.SetResourceVersion(s.nextResourceVersion(d.GVR))
+		err = store.Update(obj)
 		if err != nil {
-			err = fmt.Errorf("error update object %q to store: %v", key, name)
+			err = fmt.Errorf("cannot update object %q in store: %w", key, err)
 			handleInternalServerError(w, r, err)
 			return
 		}
-		writeJsonResponse(w, r, updatedObj)
+		writeJsonResponse(w, r, obj)
 	}
 }
 func (s *Simulator) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
@@ -809,6 +773,28 @@ func FromAnySlice(anys []any) ([]runtime.Object, error) {
 	return result, nil
 }
 
+func patchObject(objPtr runtime.Object, key string, patchJSON []byte) error {
+	objValuePtr := reflect.ValueOf(objPtr)
+	if objValuePtr.Kind() != reflect.Ptr || objValuePtr.IsNil() {
+		return fmt.Errorf("object %q must be a non-nil pointer", key)
+	}
+	objInterface := objValuePtr.Interface()
+	originalJSON, err := kjson.Marshal(objInterface)
+	if err != nil {
+		return fmt.Errorf("failed to marshal object %q: %w", key, err)
+	}
+
+	patchedJSON, err := strategicpatch.StrategicMergePatch(originalJSON, patchJSON, objInterface)
+	if err != nil {
+		return fmt.Errorf("failed to apply strategic merge patch for object %q: %w", key, err)
+	}
+	err = kjson.Unmarshal(patchedJSON, objInterface)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal patched JSON back into obj %q: %w", key, err)
+	}
+	return nil
+}
+
 func patchStatus(objPtr runtime.Object, key string, patch []byte) error {
 	objValuePtr := reflect.ValueOf(objPtr)
 	if objValuePtr.Kind() != reflect.Ptr || objValuePtr.IsNil() {
@@ -847,36 +833,3 @@ func patchStatus(objPtr runtime.Object, key string, patch []byte) error {
 	statusField.Set(newStatusVal.Elem())
 	return nil
 }
-
-//
-//type patchOp struct {
-//	Op    string          `json:"op"`
-//	Path  string          `json:"path"`
-//	Value json.RawMessage `json:"value,omitempty"`
-//}
-//
-//// ensureParents populates parent maps for all patch ops
-//func ensureParents(doc map[string]interface{}, patch []patchOp) {
-//	for _, op := range patch {
-//		if op.Op != "add" && op.Op != "replace" {
-//			continue
-//		}
-//
-//		parts := strings.Split(op.Path, "/")[1:] // skip the first empty string
-//		curr := doc
-//		for i := 0; i < len(parts)-1; i++ {
-//			key := unescape(parts[i])
-//			next, ok := curr[key]
-//			if !ok {
-//				newMap := make(map[string]interface{})
-//				curr[key] = newMap
-//				curr = newMap
-//			} else if m, ok := next.(map[string]interface{}); ok {
-//				curr = m
-//			} else {
-//				// Can't create map inside non-map field
-//				break
-//			}
-//		}
-//	}
-//}
