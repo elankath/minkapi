@@ -5,6 +5,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"os"
 	"testing"
 )
 
@@ -29,3 +30,50 @@ func TestCreateList(t *testing.T) {
 	}
 
 }
+
+func TestPatchPodStatus(t *testing.T) {
+	data := readFile(t, "testdata/pod-a.json")
+	if data == nil {
+		return
+	}
+	obj, err := typeinfo.PodsDescriptor.CreateObject()
+	if err != nil {
+		t.Errorf("Failed to create pod: %v", err)
+		return
+	}
+	pod := obj.(*corev1.Pod)
+	err = patchStatus(obj.(runtime.Object), "default/bingo", []byte(patchPodCond))
+	if err != nil {
+		t.Errorf("Failed to patch pod: %v", err)
+		return
+	}
+	t.Logf("Patched pod status: %v", pod)
+	if pod.Status.Conditions == nil {
+		t.Errorf("Failed to set pod conditions")
+	}
+}
+
+func readFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Errorf("Failed to read file from path %q: %v", path, err)
+		return nil
+	}
+	return data
+}
+
+var patchPodCond = `
+{
+  "status" : {
+    "conditions" : [ {
+      "lastProbeTime" : null,
+      "lastTransitionTime" : "2025-05-08T08:21:44Z",
+      "message" : "no nodes available to schedule pods",
+      "reason" : "Unschedulable",
+      "status" : "False",
+      "type" : "PodScheduled"
+    } ]
+  }
+}
+`

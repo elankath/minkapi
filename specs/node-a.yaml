@@ -1,7 +1,7 @@
 apiVersion: v1
 kind: Node
 metadata:
-  generateName: no-a-
+  generateName: a-
   labels:
     beta.kubernetes.io/arch: amd64
     beta.kubernetes.io/instance-type: m5.large
@@ -62,14 +62,11 @@ status:
     kubeletEndpoint:
       Port: 0
   nodeInfo:
-    architecture: ""
-    bootID: ""
-    containerRuntimeVersion: ""
-    kernelVersion: ""
-    kubeProxyVersion: ""
-    kubeletVersion: ""
-    machineID: ""
-    operatingSystem: ""
-    osImage: ""
-    systemUUID: ""
+    architecture: amd64
+    containerRuntimeVersion: containerd://1.7.23
+    kernelVersion: 6.4.0-150600.23.33-default
+    kubeProxyVersion: v1.30.11
+    kubeletVersion: v1.30.11
+    operatingSystem: linux
+    osImage: SUSE Linux Enterprise Server 15 SP6
   phase: Running

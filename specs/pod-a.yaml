@@ -7,6 +7,8 @@ metadata:
     app.kubernetes.io/component: "scalehist"
 spec:
   terminationGracePeriodSeconds: 0
+  schedulerName: "default-scheduler"
+  preemptionPolicy: PreemptLowerPriority
   containers:
     - name: pause
       image: registry.k8s.io/pause:3.5

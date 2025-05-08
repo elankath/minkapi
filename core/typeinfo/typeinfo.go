@@ -146,7 +146,7 @@ var (
 		StorageClassDescriptor, CSIDriverDescriptor, CSIStorageCapacityDescriptor, CSINodeDescriptor, VolumeAttachmentDescriptor,
 	}
 
-	SupportedVerbs = []string{"create", "delete", "get", "list", "watch"}
+	SupportedVerbs = []string{"create", "delete", "get", "list", "patch", "watch"}
 
 	SupportedAPIVersions = metav1.APIVersions{
 		TypeMeta: metav1.TypeMeta{

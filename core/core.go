@@ -2,14 +2,18 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/elankath/kapisim/core/typeinfo"
+	jsonpatch "github.com/evanphx/json-patch/v5"
 	"io"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/util/json"
+	kjson "k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
@@ -85,22 +89,6 @@ func (s *Simulator) closeWatches() {
 	return
 }
 
-//func (s *Simulator) registerRoutesForDescriptor(d typeinfo.Descriptor) {
-//	var resPath string
-//	if d.GVK.Group == "" {
-//		resPath = "/api/v1/" + d.GVR.Resource
-//	}
-//	//Example: Core Path Pattern: "POST|GET /api/v1/namespaces"
-//	//Example: Core Path Pattern: "GET|DELETE /api/v1/namespaces/{name}"
-//	s.mux.HandleFunc(fmt.Sprintf("POST %s", resPath), s.handleCreate(typeinfo.NamespacesDescriptor))
-//	s.mux.HandleFunc(fmt.Sprintf("GET %s", resPath), s.handleListOrWatch(typeinfo.NamespacesDescriptor))
-//	//// Core v1: Namespaces
-//	//s.mux.HandleFunc("POST /api/v1/namespaces", s.handleCreate(typeinfo.NamespacesDescriptor))
-//	//s.mux.HandleFunc("GET /api/v1/namespaces", s.handleListOrWatch(GVRNamespaces))
-//	//s.mux.HandleFunc("GET /api/v1/namespaces/{name}", s.handleGet(GVRNamespaces))
-//	//s.mux.HandleFunc("DELETE /api/v1/namespaces/{name}", s.handleDelete(GVRNamespaces))
-//}
-
 func (s *Simulator) registerRoutes() {
 	s.mux.HandleFunc("GET /api", s.handleAPIVersions)
 	s.mux.HandleFunc("GET /apis", s.handleAPIGroups)
@@ -133,6 +121,7 @@ func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/namespaces/{namespace}/%s", r), s.handleCreate(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s", r), s.handleListOrWatch(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleGet(d))
+		s.mux.HandleFunc(fmt.Sprintf("PATCH /api/v1/namespaces/{namespace}/%s/{name}/status", r), s.handlePatchStatus(d))
 		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), s.handleDelete(d))
 
 		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(d))
@@ -214,9 +203,12 @@ func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFun
 		obj.SetNamespace(namespace)
 		obj.SetResourceVersion(s.nextResourceVersion(descriptor.GVR))
 		obj.SetCreationTimestamp(metav1.Now())
+		obj.SetUID(uuid.NewUUID())
 
-		if err := store.Add(obj); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		err = store.Add(obj)
+		if err != nil {
+			err = fmt.Errorf("error adding object %q to store: %v", cache.NewObjectName(namespace, name), err)
+			handleInternalServerError(w, r, err)
 			return
 		}
 		s.broadcastEvent(descriptor.GVR, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
@@ -332,53 +324,135 @@ func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 		writeJsonResponse(w, r, list)
 	}
 }
-
-// createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
-// Consider using unstructured.Unstructured here for generic handling or reflection?
-func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
-	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
-	listType, ok := typesMap[string(d.ListKind)]
-	if !ok {
-		return nil, runtime.NewNotRegisteredErrForKind(typeinfo.SupportedScheme.Name(), d.ListGVK)
-	}
-	ptr := reflect.New(listType) // *PodList
-	listObjVal := ptr.Elem()     // PodList
-	typeMetaVal := listObjVal.FieldByName("TypeMeta")
-	if !typeMetaVal.IsValid() {
-		return nil, fmt.Errorf("failed to get TypeMeta field on %v", listObjVal)
-	}
-	listMetaVal := listObjVal.FieldByName("ListMeta")
-	if !listMetaVal.IsValid() {
-		return nil, fmt.Errorf("failed to get ListMeta field on %v", listObjVal)
-	}
-	typeMetaVal.Set(reflect.ValueOf(metav1.TypeMeta{
-		Kind:       string(d.ListKind),
-		APIVersion: d.GVR.GroupVersion().String(),
-	}))
-	listMetaVal.Set(reflect.ValueOf(metav1.ListMeta{
-		ResourceVersion: currVersionStr,
-	}))
-
-	itemsField := listObjVal.FieldByName("Items")
-	if !itemsField.IsValid() || !itemsField.CanSet() || itemsField.Kind() != reflect.Slice {
-		return nil, fmt.Errorf("list object for %q does not have a settable slice field named Items", d.GVK.Kind)
-	}
-	itemType := itemsField.Type().Elem() // e.g., v1.Pod
-	resultSlice := reflect.MakeSlice(itemsField.Type(), 0, len(items))
-
-	for _, obj := range items {
-		val := reflect.ValueOf(obj)
-		if val.Kind() != reflect.Ptr || val.IsNil() {
-			return nil, fmt.Errorf("element for kind %q is not a non-nil pointer: %T", d.Kind, obj)
+func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		store := s.getStoreOrWriteError(d.GVR, w, r)
+		if store == nil {
+			return
 		}
-		if val.Elem().Type() != itemType {
-			return nil, fmt.Errorf("type mismatch, list kind %q expects items of type %v, but got %v", d.ListKind, itemType, val.Elem().Type())
+
+		key := GetObjectKey(r)
+		obj, exists, err := store.GetByKey(key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
 		}
-		resultSlice = reflect.Append(resultSlice, val.Elem()) // append the dereferenced struct
+		if !exists {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		contentType := r.Header.Get("Content-Type")
+		if contentType != "application/json-patch+json" && contentType != "application/merge-patch+json" {
+			statusErr := apierrors.NewBadRequest(fmt.Sprintf("Content type %s is not supported", contentType)) // TODO: unsure whether status code here is right.
+			writeStatusError(w, r, statusErr)
+			return
+		}
+		patchData, err := io.ReadAll(r.Body)
+		if err != nil {
+			statusErr := apierrors.NewInternalError(err)
+			writeStatusError(w, r, statusErr)
+			return
+		}
+		oldJSON, err := kjson.Marshal(obj)
+		if err != nil {
+			statusErr := apierrors.NewInternalError(fmt.Errorf("failed to serialize obj for key %q: %w", key, err))
+			writeStatusError(w, r, statusErr)
+			return
+		}
+		var newJSON []byte
+		switch contentType {
+		case "application/merge-patch+json":
+			newJSON, err = jsonpatch.MergePatch(oldJSON, patchData)
+			if err != nil {
+				err = fmt.Errorf("failed to merge patch data for obj %q: %w", key, err)
+				handleInternalServerError(w, r, err)
+				return
+			}
+		case "application/json-patch+json":
+			var patch jsonpatch.Patch
+			patch, err = jsonpatch.DecodePatch(patchData)
+			if err != nil {
+				err = fmt.Errorf("failed to decode patch data for obj %q: %w", key, err)
+				handleInternalServerError(w, r, err)
+				return
+			}
+			newJSON, err = patch.Apply(oldJSON)
+			if err != nil {
+				err = fmt.Errorf("failed to merge patch data for obj %q: %w", key, err)
+				handleInternalServerError(w, r, err)
+				return
+			}
+		}
+		// Deserialize back to Pod
+		updatedObj, err := d.CreateObject()
+		err = json.Unmarshal(newJSON, updatedObj)
+		if err != nil {
+			err = fmt.Errorf("failed to deserialize merged obj %q: %w", key, err)
+			handleInternalServerError(w, r, err)
+			return
+		}
+		metaObj := obj.(metav1.Object)
+		name := metaObj.GetName()
+		updatedObj.SetName(name)
+		updatedObj.SetNamespace(metaObj.GetNamespace())
+		updatedObj.SetResourceVersion(s.nextResourceVersion(d.GVR))
+
+		err = store.Update(updatedObj)
+		if err != nil {
+			err = fmt.Errorf("error update object %q to store: %v", key, name)
+			handleInternalServerError(w, r, err)
+			return
+		}
+		writeJsonResponse(w, r, updatedObj)
 	}
-	itemsField.Set(resultSlice)
-	listObj := ptr.Interface().(runtime.Object)
-	return listObj, nil
+}
+func (s *Simulator) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		store := s.getStoreOrWriteError(d.GVR, w, r)
+		if store == nil {
+			return
+		}
+
+		key := GetObjectKey(r)
+		obj, exists, err := store.GetByKey(key)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !exists {
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		contentType := r.Header.Get("Content-Type")
+		if contentType != "application/strategic-merge-patch+json" {
+			err = fmt.Errorf("unsupported content type %q for obj %q", contentType, key)
+			handleInternalServerError(w, r, err)
+			return
+		}
+
+		patchData, err := io.ReadAll(r.Body)
+		if err != nil {
+			err = fmt.Errorf("failed to read patch body for obj %q", key)
+			handleInternalServerError(w, r, err)
+			return
+		}
+		runtimeObj := obj.(runtime.Object)
+		err = patchStatus(runtimeObj, key, patchData)
+		if err != nil {
+			err = fmt.Errorf("failed to atch status for obj %q: %w", key, err)
+			handleInternalServerError(w, r, err)
+			return
+		}
+		metaObj := obj.(metav1.Object)
+		metaObj.SetResourceVersion(s.nextResourceVersion(d.GVR))
+		err = store.Update(obj)
+		if err != nil {
+			err = fmt.Errorf("cannot update object %q in store: %w", key, err)
+			handleInternalServerError(w, r, err)
+			return
+		}
+		writeJsonResponse(w, r, obj)
+	}
 }
 
 func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
@@ -479,14 +553,6 @@ func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace stri
 	return
 }
 
-func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error) {
-	klog.Error(err)
-	statusErr := apierrors.NewInternalError(err)
-	w.WriteHeader(http.StatusInternalServerError)
-	w.Header().Set("Content-Type", "application/json")
-	writeJsonResponse(w, r, statusErr.ErrStatus)
-}
-
 func (s *Simulator) removeWatch(gvr schema.GroupVersionResource, namespace string, ch chan watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
@@ -576,6 +642,54 @@ func (s *Simulator) currResourceVersion(gvr schema.GroupVersionResource) string 
 	return strconv.FormatInt(s.versions[gvr], 10)
 }
 
+// createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
+// Consider using unstructured.Unstructured here for generic handling or reflection?
+func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
+	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
+	listType, ok := typesMap[string(d.ListKind)]
+	if !ok {
+		return nil, runtime.NewNotRegisteredErrForKind(typeinfo.SupportedScheme.Name(), d.ListGVK)
+	}
+	ptr := reflect.New(listType) // *PodList
+	listObjVal := ptr.Elem()     // PodList
+	typeMetaVal := listObjVal.FieldByName("TypeMeta")
+	if !typeMetaVal.IsValid() {
+		return nil, fmt.Errorf("failed to get TypeMeta field on %v", listObjVal)
+	}
+	listMetaVal := listObjVal.FieldByName("ListMeta")
+	if !listMetaVal.IsValid() {
+		return nil, fmt.Errorf("failed to get ListMeta field on %v", listObjVal)
+	}
+	typeMetaVal.Set(reflect.ValueOf(metav1.TypeMeta{
+		Kind:       string(d.ListKind),
+		APIVersion: d.GVR.GroupVersion().String(),
+	}))
+	listMetaVal.Set(reflect.ValueOf(metav1.ListMeta{
+		ResourceVersion: currVersionStr,
+	}))
+
+	itemsField := listObjVal.FieldByName("Items")
+	if !itemsField.IsValid() || !itemsField.CanSet() || itemsField.Kind() != reflect.Slice {
+		return nil, fmt.Errorf("list object for %q does not have a settable slice field named Items", d.GVK.Kind)
+	}
+	itemType := itemsField.Type().Elem() // e.g., v1.Pod
+	resultSlice := reflect.MakeSlice(itemsField.Type(), 0, len(items))
+
+	for _, obj := range items {
+		val := reflect.ValueOf(obj)
+		if val.Kind() != reflect.Ptr || val.IsNil() {
+			return nil, fmt.Errorf("element for kind %q is not a non-nil pointer: %T", d.Kind, obj)
+		}
+		if val.Elem().Type() != itemType {
+			return nil, fmt.Errorf("type mismatch, list kind %q expects items of type %v, but got %v", d.ListKind, itemType, val.Elem().Type())
+		}
+		resultSlice = reflect.Append(resultSlice, val.Elem()) // append the dereferenced struct
+	}
+	itemsField.Set(resultSlice)
+	listObj := ptr.Interface().(runtime.Object)
+	return listObj, nil
+}
+
 func writeStatusError(w http.ResponseWriter, r *http.Request, statusError *apierrors.StatusError) {
 	w.WriteHeader(int(statusError.ErrStatus.Code))
 	writeJsonResponse(w, r, statusError.ErrStatus)
@@ -645,7 +759,7 @@ func buildWatchEventJson(event *watch.Event) (string, error) {
 	//	s.removeWatch(gvr, namespace, ch)
 	//	return
 	//}
-	data, err := json.Marshal(event.Object)
+	data, err := kjson.Marshal(event.Object)
 	if err != nil {
 		klog.Errorf("Failed to encode watch event: %v", err)
 		return "", err
@@ -664,6 +778,14 @@ func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) 
 	}
 	ok = true
 	return
+}
+
+func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error) {
+	klog.Error(err)
+	statusErr := apierrors.NewInternalError(err)
+	w.WriteHeader(http.StatusInternalServerError)
+	w.Header().Set("Content-Type", "application/json")
+	writeJsonResponse(w, r, statusErr.ErrStatus)
 }
 
 func GetObjectName(r *http.Request) cache.ObjectName {
@@ -686,3 +808,75 @@ func FromAnySlice(anys []any) ([]runtime.Object, error) {
 	}
 	return result, nil
 }
+
+func patchStatus(objPtr runtime.Object, key string, patch []byte) error {
+	objValuePtr := reflect.ValueOf(objPtr)
+	if objValuePtr.Kind() != reflect.Ptr || objValuePtr.IsNil() {
+		return fmt.Errorf("object %q must be a non-nil pointer", key)
+	}
+	statusField := objValuePtr.Elem().FieldByName("Status")
+	if !statusField.IsValid() {
+		return fmt.Errorf("object %q of type %T has no Status field", key, objPtr)
+	}
+
+	var patchWrapper map[string]json.RawMessage
+	err := json.Unmarshal(patch, &patchWrapper)
+	if err != nil {
+		return fmt.Errorf("failed to parse patch for %q as JSON object: %w", key, err)
+	}
+	statusPatchRaw, ok := patchWrapper["status"]
+	if !ok {
+		return fmt.Errorf("patch for %q does not contain a 'status' key", key)
+	}
+
+	statusInterface := statusField.Interface()
+	originalStatusJSON, err := kjson.Marshal(statusInterface)
+	if err != nil {
+		return fmt.Errorf("failed to marshal original status for object %q: %w", key, err)
+	}
+	patchedStatusJSON, err := strategicpatch.StrategicMergePatch(originalStatusJSON, statusPatchRaw, statusInterface)
+	if err != nil {
+		return fmt.Errorf("failed to apply strategic merge patch for object %q: %w", key, err)
+	}
+
+	newStatusVal := reflect.New(statusField.Type())
+	newStatusPtr := newStatusVal.Interface()
+	if err := json.Unmarshal(patchedStatusJSON, newStatusPtr); err != nil {
+		return fmt.Errorf("failed to unmarshal patched status for object %q: %w", key, err)
+	}
+	statusField.Set(newStatusVal.Elem())
+	return nil
+}
+
+//
+//type patchOp struct {
+//	Op    string          `json:"op"`
+//	Path  string          `json:"path"`
+//	Value json.RawMessage `json:"value,omitempty"`
+//}
+//
+//// ensureParents populates parent maps for all patch ops
+//func ensureParents(doc map[string]interface{}, patch []patchOp) {
+//	for _, op := range patch {
+//		if op.Op != "add" && op.Op != "replace" {
+//			continue
+//		}
+//
+//		parts := strings.Split(op.Path, "/")[1:] // skip the first empty string
+//		curr := doc
+//		for i := 0; i < len(parts)-1; i++ {
+//			key := unescape(parts[i])
+//			next, ok := curr[key]
+//			if !ok {
+//				newMap := make(map[string]interface{})
+//				curr[key] = newMap
+//				curr = newMap
+//			} else if m, ok := next.(map[string]interface{}); ok {
+//				curr = m
+//			} else {
+//				// Can't create map inside non-map field
+//				break
+//			}
+//		}
+//	}
+//}
