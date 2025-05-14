@@ -1,6 +1,6 @@
 # MinKAPI
 
-minkapi is minimal, lean implmeentation of  Kubernetes API Server - an  in-memory implementation that can mimic core functions of an kubernetes API server and simulate initialization of some core resources such as Nodes, Pods. 
+minkapi is minimal, lean implmeentation of  Kubernetes API Server - an  in-memory implementation that can mimic core functions of an kubernetes API server and offer basic CRUD for selected resources in core/app/scheduling/storage API groups.
 
 Primarily meant to offer enough of the surface area of the kubernetes API server so that the Kube Scheduler and the Kubernetes Cluster Autoscaler can operate their controller loops.
 
