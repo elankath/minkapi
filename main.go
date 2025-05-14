@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"github.com/elankath/kapisim/core"
+	"github.com/elankath/minkapi/core"
 	"k8s.io/klog/v2"
 	"os"
 	"os/signal"
@@ -11,11 +11,11 @@ import (
 )
 
 func main() {
-	server, err := core.NewKAPISimulator()
+	server, err := core.NewInMemoryMinKAPI()
 	if err != nil {
-		klog.Fatalf("failed to initialize Simulator: %v", err)
+		klog.Fatalf("failed to initialize InMemoryKAPI: %v", err)
 	}
-	klog.Info("Kubernetes API Simulator running on :8080")
+	klog.Info("Kubernetes API InMemoryKAPI running on :8080")
 
 	// Set up signal handling
 	sigCh := make(chan os.Signal, 1)
@@ -39,8 +39,8 @@ func main() {
 
 	// Perform shutdown
 	if err := server.Shutdown(ctx); err != nil {
-		klog.Errorf("Kubernetes API Simulator Shutdown failed: %v", err)
+		klog.Errorf("Kubernetes API InMemoryKAPI Shutdown failed: %v", err)
 		os.Exit(1)
 	}
-	klog.Info("Kubernetes API Simulator Shutdown gracefully")
+	klog.Info("Kubernetes API InMemoryKAPI Shutdown gracefully")
 }

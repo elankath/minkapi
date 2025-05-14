@@ -1,4 +1,4 @@
-module github.com/elankath/kapisim
+module github.com/elankath/minkapi
 
 go 1.24.0
 

@@ -4,7 +4,7 @@ metadata:
   generateName: a-
   labels:
     app.kubernetes.io/name: "a"
-    app.kubernetes.io/component: "scalehist"
+    app.kubernetes.io/component: "minkapi"
 spec:
   terminationGracePeriodSeconds: 0
   schedulerName: "default-scheduler"

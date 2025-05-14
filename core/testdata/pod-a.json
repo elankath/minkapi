@@ -5,7 +5,7 @@
         "creationTimestamp": "2025-05-08T08:30:00Z",
         "generateName": "a-",
         "labels": {
-            "app.kubernetes.io/component": "kapisimtest",
+            "app.kubernetes.io/component": "minkapitest",
             "app.kubernetes.io/name": "a"
         },
         "name": "bingo",

@@ -1,4 +1,4 @@
 package api
 
-type SimulatorAccess interface {
+type MinKAPIAccess interface {
 }

@@ -1,10 +1,10 @@
-// Package verify module is used for quick developer testing against the kapisim service
+// Package verify module is used for quick developer testing against the minkapi service
 package verify
 
 import (
 	"context"
 	"fmt"
-	"github.com/elankath/kapisim/core/typeinfo"
+	"github.com/elankath/minkapi/core/typeinfo"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -21,9 +21,9 @@ import (
 
 // TestMain should handle server setup/teardown for the test suite.
 func TestMain(m *testing.M) {
-	//TODO: start kapisim server
+	//TODO: start minkapi server
 	code := m.Run() // Run tests
-	//TODO: shutdown kapisim server
+	//TODO: shutdown minkapi server
 	os.Exit(code)
 }
 
@@ -218,7 +218,7 @@ func createKubeClient(t *testing.T) kubernetes.Interface {
 func getKubeConfigPath() string {
 	kubeConfigPath := os.Getenv("KUBECONFIG")
 	if kubeConfigPath == "" {
-		kubeConfigPath = "/tmp/kapisim.yaml"
+		kubeConfigPath = "/tmp/minkapi.yaml"
 	}
 	return kubeConfigPath
 }

@@ -4,4 +4,4 @@ metadata:
   name: a
 value: 1000000
 globalDefault: false
-description: "This priority class has name 'a' and is used for testing kapisim"
+description: "This priority class has name 'a' and is used for testing minkapi"

@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/elankath/kapisim/core/podutil"
-	"github.com/elankath/kapisim/core/typeinfo"
+	"github.com/elankath/minkapi/api"
+	"github.com/elankath/minkapi/core/podutil"
+	"github.com/elankath/minkapi/core/typeinfo"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -26,8 +27,10 @@ import (
 	"time"
 )
 
-// Simulator holds the in-memory stores, watch channels, and version tracking
-type Simulator struct {
+var _ api.MinKAPIAccess = (*InMemoryKAPI)(nil)
+
+// InMemoryKAPI holds the in-memory stores, watch channels, and version tracking for simple implementation of api.MinKAPIAccess
+type InMemoryKAPI struct {
 	scheme    *runtime.Scheme
 	mux       *http.ServeMux
 	storeLock sync.Mutex
@@ -38,13 +41,13 @@ type Simulator struct {
 	server    *http.Server
 }
 
-func NewKAPISimulator() (*Simulator, error) {
+func NewInMemoryMinKAPI() (*InMemoryKAPI, error) {
 	mux := http.NewServeMux()
 	stores := map[schema.GroupVersionResource]cache.Store{}
 	for _, sd := range typeinfo.SupportedDescriptors {
 		stores[sd.GVR] = cache.NewStore(cache.MetaNamespaceKeyFunc)
 	}
-	s := &Simulator{
+	s := &InMemoryKAPI{
 		stores:   stores,
 		watchers: make(map[schema.GroupVersionResource]map[string]chan watch.Event),
 		versions: make(map[schema.GroupVersionResource]int64),
@@ -59,12 +62,12 @@ func NewKAPISimulator() (*Simulator, error) {
 	return s, nil
 }
 
-func (s *Simulator) GetMux() *http.ServeMux {
+func (s *InMemoryKAPI) GetMux() *http.ServeMux {
 	return s.mux
 }
 
 // Start begins the HTTP server
-func (s *Simulator) Start() error {
+func (s *InMemoryKAPI) Start() error {
 	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("server failed: %v", err)
 	}
@@ -72,12 +75,12 @@ func (s *Simulator) Start() error {
 }
 
 // Shutdown cleans up resources and shuts down the HTTP server
-func (s *Simulator) Shutdown(ctx context.Context) error {
+func (s *InMemoryKAPI) Shutdown(ctx context.Context) error {
 	s.closeWatches()
 	return s.server.Shutdown(ctx)
 }
 
-func (s *Simulator) closeWatches() {
+func (s *InMemoryKAPI) closeWatches() {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 	for gvr, nsWatchers := range s.watchers {
@@ -90,7 +93,7 @@ func (s *Simulator) closeWatches() {
 	return
 }
 
-func (s *Simulator) registerRoutes() {
+func (s *InMemoryKAPI) registerRoutes() {
 	s.mux.HandleFunc("GET /api", s.handleAPIVersions)
 	s.mux.HandleFunc("GET /apis", s.handleAPIGroups)
 
@@ -103,7 +106,7 @@ func (s *Simulator) registerRoutes() {
 
 }
 
-func (s *Simulator) registerAPIGroups() {
+func (s *InMemoryKAPI) registerAPIGroups() {
 
 	// Core API
 	s.mux.HandleFunc("GET /api/v1/", s.handleAPIResources(typeinfo.SupportedCoreAPIResourceList))
@@ -115,7 +118,7 @@ func (s *Simulator) registerAPIGroups() {
 	}
 }
 
-func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
+func (s *InMemoryKAPI) registerResourceRoutes(d typeinfo.Descriptor) {
 	g := d.GVK.Group
 	r := d.GVR.Resource
 	if d.GVK.Group == "" {
@@ -148,7 +151,7 @@ func (s *Simulator) registerResourceRoutes(d typeinfo.Descriptor) {
 }
 
 // handleAPIGroups returns the list of supported API groups
-func (s *Simulator) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
+func (s *InMemoryKAPI) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -157,7 +160,7 @@ func (s *Simulator) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleAPIVersions returns the list of versions for the core API group
-func (s *Simulator) handleAPIVersions(w http.ResponseWriter, r *http.Request) {
+func (s *InMemoryKAPI) handleAPIVersions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -165,7 +168,7 @@ func (s *Simulator) handleAPIVersions(w http.ResponseWriter, r *http.Request) {
 	writeJsonResponse(w, r, &typeinfo.SupportedAPIVersions)
 }
 
-func (s *Simulator) handleAPIResources(apiResourceList metav1.APIResourceList) http.HandlerFunc {
+func (s *InMemoryKAPI) handleAPIResources(apiResourceList metav1.APIResourceList) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -175,7 +178,7 @@ func (s *Simulator) handleAPIResources(apiResourceList metav1.APIResourceList) h
 	}
 }
 
-func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(descriptor.GVR, w)
 		if store == nil {
@@ -186,8 +189,8 @@ func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFun
 		obj, err = descriptor.CreateObject()
 
 		if err != nil {
-			klog.Errorf("Error creating object from GVK %q: %v", descriptor.GVK, err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			err = fmt.Errorf("cannot create object from GVK %q: %v", descriptor.GVK, err)
+			handleInternalServerError(w, r, err)
 			return
 		}
 
@@ -200,7 +203,8 @@ func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFun
 		namePrefix := obj.GetGenerateName()
 		if name == "" {
 			if namePrefix == "" {
-				http.Error(w, "Name or GenerateName is required", http.StatusBadRequest)
+				err = fmt.Errorf("missing both name and generateName in request for creating object of GVK %q in %q namespace", descriptor.GVK, namespace)
+				handleBadRequest(w, r, err)
 				return
 			}
 			name = typeinfo.GenerateName(namePrefix)
@@ -223,7 +227,7 @@ func (s *Simulator) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFun
 	}
 }
 
-func (s *Simulator) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
@@ -243,7 +247,7 @@ func (s *Simulator) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 	}
 }
 
-func (s *Simulator) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
@@ -293,7 +297,7 @@ func (s *Simulator) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 	}
 }
 
-func (s *Simulator) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		isWatch := query.Get("watch")
@@ -306,7 +310,7 @@ func (s *Simulator) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc {
 		delegate.ServeHTTP(w, r)
 	}
 }
-func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
@@ -329,7 +333,7 @@ func (s *Simulator) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 		writeJsonResponse(w, r, list)
 	}
 }
-func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
@@ -374,7 +378,7 @@ func (s *Simulator) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 		writeJsonResponse(w, r, obj)
 	}
 }
-func (s *Simulator) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
@@ -423,7 +427,7 @@ func (s *Simulator) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
 	}
 }
 
-func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
@@ -493,7 +497,7 @@ func (s *Simulator) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 //
 // Example Payload
 // {"kind":"Binding","apiVersion":"v1","metadata":{"name":"a-p4r2l","namespace":"default","uid":"b8124ee8-a0c7-4069-930d-fc5e901675d3"},"target":{"kind":"Node","name":"a-kl827"}}
-func (s *Simulator) handleCreatePodBinding(w http.ResponseWriter, r *http.Request) {
+func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Request) {
 	d := typeinfo.PodsDescriptor
 	store := s.getStoreOrWriteError(d.GVR, w)
 	if store == nil {
@@ -569,21 +573,21 @@ func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace stri
 	return
 }
 
-func (s *Simulator) removeWatch(gvr schema.GroupVersionResource, namespace string, ch chan watch.Event) {
+func (s *InMemoryKAPI) removeWatch(gvr schema.GroupVersionResource, namespace string, ch chan watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 	delete(s.watchers[gvr], namespace)
 	close(ch)
 }
 
-func (s *Simulator) getCurrentVersion(gvr schema.GroupVersionResource) int64 {
+func (s *InMemoryKAPI) getCurrentVersion(gvr schema.GroupVersionResource) int64 {
 	s.storeLock.Lock()
 	currentVersion := s.versions[gvr]
 	s.storeLock.Unlock()
 	return currentVersion
 }
 
-func (s *Simulator) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
+func (s *InMemoryKAPI) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 	if _, ok := s.watchers[gvr]; !ok {
@@ -595,7 +599,7 @@ func (s *Simulator) createWatchChan(gvr schema.GroupVersionResource, namespace s
 }
 
 // broadcastEvent sends an event to all watchers for a GVR and namespace
-func (s *Simulator) broadcastEvent(gvr schema.GroupVersionResource, namespace string, event watch.Event) {
+func (s *InMemoryKAPI) broadcastEvent(gvr schema.GroupVersionResource, namespace string, event watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 
@@ -609,34 +613,34 @@ func (s *Simulator) broadcastEvent(gvr schema.GroupVersionResource, namespace st
 	}
 }
 
-// generateKubeconfig creates a simple kubeconfig file at /tmp/kapisim.yaml
-func (s *Simulator) generateKubeconfig() error {
+// generateKubeconfig creates a simple kubeconfig file at /tmp/minkapi.yaml
+func (s *InMemoryKAPI) generateKubeconfig() error {
 	kubeconfig := `apiVersion: v1
 kind: Config
 clusters:
 - cluster:
     insecure-skip-tls-verify: true
     server: http://localhost:8080
-  name: kapisim
+  name: minkapi
 contexts:
 - context:
-    cluster: kapisim
-    user: kapisim-user
+    cluster: minkapi
+    user: minkapi-user
     namespace: default
-  name: kapisim-context
-current-context: kapisim-context
+  name: minkapi-context
+current-context: minkapi-context
 users:
-- name: kapisim-user
+- name: minkapi-user
   user: {}
 `
-	return os.WriteFile("/tmp/kapisim.yaml", []byte(kubeconfig), 0644)
+	return os.WriteFile("/tmp/minkapi.yaml", []byte(kubeconfig), 0644)
 }
 
-func (s *Simulator) getStore(gvr schema.GroupVersionResource) cache.Store {
+func (s *InMemoryKAPI) getStore(gvr schema.GroupVersionResource) cache.Store {
 	return s.stores[gvr]
 }
 
-func (s *Simulator) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter) (store cache.Store) {
+func (s *InMemoryKAPI) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter) (store cache.Store) {
 	store = s.getStore(gvr)
 	if store == nil {
 		http.Error(w, "Resource not supported", http.StatusNotFound)
@@ -645,14 +649,14 @@ func (s *Simulator) getStoreOrWriteError(gvr schema.GroupVersionResource, w http
 }
 
 // nextResourceVersion increments and returns the next version for a GVR
-func (s *Simulator) nextResourceVersion(gvr schema.GroupVersionResource) string {
+func (s *InMemoryKAPI) nextResourceVersion(gvr schema.GroupVersionResource) string {
 	s.storeLock.Lock()
 	defer s.storeLock.Unlock()
 	s.versions[gvr]++
 	return strconv.FormatInt(s.versions[gvr], 10)
 }
 
-func (s *Simulator) currResourceVersion(gvr schema.GroupVersionResource) string {
+func (s *InMemoryKAPI) currResourceVersion(gvr schema.GroupVersionResource) string {
 	s.storeLock.Lock()
 	defer s.storeLock.Unlock()
 	return strconv.FormatInt(s.versions[gvr], 10)
@@ -787,10 +791,15 @@ func buildWatchEventJson(event *watch.Event) (string, error) {
 func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		handleBadRequest(w, r, err)
+		ok = false
+		return
 	}
 	if err := json.Unmarshal(data, obj); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		err = fmt.Errorf("cannot unmarshal JSON for request %q: %w", r.RequestURI, err)
+		handleBadRequest(w, r, err)
+		ok = false
+		return
 	}
 	ok = true
 	return
@@ -798,14 +807,23 @@ func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) 
 
 func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error) {
 	klog.Error(err)
+	http.Error(w, "Name or GenerateName is required", http.StatusBadRequest)
 	statusErr := apierrors.NewInternalError(err)
 	w.WriteHeader(http.StatusInternalServerError)
 	w.Header().Set("Content-Type", "application/json")
 	writeJsonResponse(w, r, statusErr.ErrStatus)
 }
 
+func handleBadRequest(w http.ResponseWriter, r *http.Request, err error) {
+	klog.Error(err)
+	statusErr := apierrors.NewBadRequest(err.Error())
+	w.WriteHeader(http.StatusBadRequest)
+	w.Header().Set("Content-Type", "application/json")
+	writeJsonResponse(w, r, statusErr.ErrStatus)
+}
+
 func handleNotFound(w http.ResponseWriter, r *http.Request, gr schema.GroupVersionResource, key string) {
-	klog.Error("cannot find object with key %q of resource %q", key, gr.Resource)
+	klog.Errorf("cannot find object with key %q of resource %q", key, gr.Resource)
 	statusErr := apierrors.NewNotFound(gr.GroupResource(), key)
 	w.WriteHeader(http.StatusNotFound)
 	w.Header().Set("Content-Type", "application/json")

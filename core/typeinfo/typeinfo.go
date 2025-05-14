@@ -26,8 +26,10 @@ const (
 	NamespaceKind     KindName = "Namespace"
 	NamespaceListKind KindName = "NamespaceList"
 
-	NodeKind     KindName = "Node"
-	NodeListKind KindName = "NodeList"
+	ServiceAccountKind     KindName = "ServiceAccount"
+	ServiceAccountListKind KindName = "ServiceAccountList"
+	NodeKind               KindName = "Node"
+	NodeListKind           KindName = "NodeList"
 
 	PodKind     KindName = "Pod"
 	PodListKind KindName = "PodList"
@@ -106,8 +108,9 @@ var (
 	SupportedScheme      = RegisterSchemes()
 	NamespacesDescriptor = NewDescriptor(NamespaceKind, NamespaceListKind, false, corev1.SchemeGroupVersion.WithResource("namespaces"), "ns")
 
-	NodesDescriptor = NewDescriptor(NodeKind, NodeListKind, false, corev1.SchemeGroupVersion.WithResource("nodes"), "no")
-	PodsDescriptor  = NewDescriptor(PodKind, PodListKind, true, corev1.SchemeGroupVersion.WithResource("pods"), "po")
+	ServiceAccountsDescriptor = NewDescriptor(ServiceAccountKind, ServiceAccountListKind, true, corev1.SchemeGroupVersion.WithResource("serviceaccounts"), "sa")
+	NodesDescriptor           = NewDescriptor(NodeKind, NodeListKind, false, corev1.SchemeGroupVersion.WithResource("nodes"), "no")
+	PodsDescriptor            = NewDescriptor(PodKind, PodListKind, true, corev1.SchemeGroupVersion.WithResource("pods"), "po")
 
 	ServicesDescriptor          = NewDescriptor(ServiceKind, ServiceListKind, true, corev1.SchemeGroupVersion.WithResource("services"), "svc")
 	PersistentVolumesDescriptor = NewDescriptor(PersistentVolumeKind, PersistentVolumeListKind, false, corev1.SchemeGroupVersion.WithResource("persistentvolumes"), "pv")
@@ -136,7 +139,7 @@ var (
 	VolumeAttachmentDescriptor = NewDescriptor(VolumeAttachmentKind, VolumeAttachmentListKind, false, storagev1.SchemeGroupVersion.WithResource("volumeattachments"))
 
 	SupportedDescriptors = []Descriptor{
-		NamespacesDescriptor, NodesDescriptor, PodsDescriptor, ServicesDescriptor, PersistentVolumesDescriptor, PersistentVolumeClaimsDescriptor, ReplicationControllersDescriptor,
+		ServiceAccountsDescriptor, NamespacesDescriptor, NodesDescriptor, PodsDescriptor, ServicesDescriptor, PersistentVolumesDescriptor, PersistentVolumeClaimsDescriptor, ReplicationControllersDescriptor,
 		PriorityClassesDescriptor,
 		LeaseDescriptor,
 		EventsDescriptor,
@@ -169,6 +172,7 @@ var (
 		},
 		GroupVersion: "v1",
 		APIResources: []metav1.APIResource{
+			ServiceAccountsDescriptor.APIResource,
 			NamespacesDescriptor.APIResource,
 			NodesDescriptor.APIResource,
 			PodsDescriptor.APIResource,
