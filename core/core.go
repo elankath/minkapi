@@ -49,8 +49,8 @@ func NewInMemoryMinKAPI() (*InMemoryKAPI, error) {
 	}
 	s := &InMemoryKAPI{
 		stores:   stores,
-		watchers: make(map[schema.GroupVersionResource]map[string]chan watch.Event),
-		versions: make(map[schema.GroupVersionResource]int64),
+		watchers: make(map[schema.GroupVersionResource]map[string]chan watch.Event, 100),
+		versions: make(map[schema.GroupVersionResource]int64, 100),
 		scheme:   typeinfo.SupportedScheme,
 		mux:      mux,
 		server:   &http.Server{Addr: ":8080", Handler: mux},
@@ -211,7 +211,9 @@ func (s *InMemoryKAPI) handleCreate(descriptor typeinfo.Descriptor) http.Handler
 		}
 
 		obj.SetName(name)
-		obj.SetNamespace(namespace)
+		if obj.GetNamespace() == "" {
+			obj.SetNamespace(namespace)
+		}
 		obj.SetResourceVersion(s.nextResourceVersion(descriptor.GVR))
 		obj.SetCreationTimestamp(metav1.Now())
 		obj.SetUID(uuid.NewUUID())
@@ -254,41 +256,40 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			return
 		}
 
-		on := GetObjectName(r)
-		obj, exists, err := store.GetByKey(on.String())
+		objName := GetObjectName(r)
+		obj, exists, err := store.GetByKey(objName.String())
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			handleInternalServerError(w, r, fmt.Errorf("cannot get object with key %q from store: %w", objName, err))
 			return
 		}
 		if !exists {
-			statusErr := apierrors.NewNotFound(d.GVR.GroupResource(), on.String())
-			writeStatusError(w, r, statusErr)
+			handleNotFound(w, r, d.GVR, objName.String())
 			return
 		}
 		runtimeObj, ok := obj.(runtime.Object)
 		if !ok {
-			http.Error(w, "Stored object is not a runtime.Object", http.StatusInternalServerError)
+			handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not runtime.Object", objName))
 			return
 		}
 		metav1Obj, ok := obj.(metav1.Object)
 		if !ok {
-			http.Error(w, "Stored object is not a metav1.Object", http.StatusInternalServerError)
+			handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not mtav1.Object", objName))
 			return
 		}
 		err = store.Delete(obj)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			handleInternalServerError(w, r, fmt.Errorf("cannot delete object with key %q: %w", objName, err))
 			return
 		}
-		s.broadcastEvent(d.GVR, on.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
+		s.broadcastEvent(d.GVR, objName.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
 		status := metav1.Status{
-			TypeMeta: metav1.TypeMeta{ //No idea why this is needed, but kubectl complains
+			TypeMeta: metav1.TypeMeta{ //No idea why this is explicitly needed just for this payload, but kubectl complains
 				Kind:       "Status",
 				APIVersion: "v1",
 			},
 			Status: metav1.StatusSuccess,
 			Details: &metav1.StatusDetails{
-				Name: on.String(),
+				Name: objName.String(),
 				Kind: d.GVR.GroupResource().Resource,
 				UID:  metav1Obj.GetUID(),
 			},
@@ -316,6 +317,7 @@ func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 		if store == nil {
 			return
 		}
+		namespace := getNamespace(r)
 		items := store.List()
 		currentVersionStr := fmt.Sprintf("%d", s.getCurrentVersion(d.GVR))
 		objItems, err := FromAnySlice(items)
@@ -324,7 +326,7 @@ func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 			writeStatusError(w, r, statusErr)
 			return
 		}
-		list, err := createList(d, currentVersionStr, objItems)
+		list, err := createList(d, namespace, currentVersionStr, objItems)
 		if err != nil {
 			statusErr := apierrors.NewInternalError(err)
 			writeStatusError(w, r, statusErr)
@@ -342,11 +344,12 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 		key := GetObjectKey(r)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			err = fmt.Errorf("cannot get obj by key %q: %w", key, err)
+			handleInternalServerError(w, r, err)
 			return
 		}
 		if !exists {
-			http.Error(w, "Not Found", http.StatusNotFound)
+			handleNotFound(w, r, d.GVR, key)
 			return
 		}
 		contentType := r.Header.Get("Content-Type")
@@ -388,11 +391,12 @@ func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc
 		key := GetObjectKey(r)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			err = fmt.Errorf("cannot get obj by key %q: %w", key, err)
+			handleInternalServerError(w, r, err)
 			return
 		}
 		if !exists {
-			http.Error(w, "Not Found", http.StatusNotFound)
+			handleNotFound(w, r, d.GVR, key)
 			return
 		}
 		contentType := r.Header.Get("Content-Type")
@@ -463,12 +467,15 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 		for {
 			select {
 			case event := <-ch:
-				rv, _ := strconv.ParseInt(event.Object.(metav1.Object).GetResourceVersion(), 10, 64)
+				metaObj := event.Object.(metav1.Object)
+				rv, _ := strconv.ParseInt(metaObj.GetResourceVersion(), 10, 64)
 				if rv > startVersion {
 					eventJson, err := buildWatchEventJson(&event)
 					if err != nil {
-						http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
 						s.removeWatch(d.GVR, namespace, ch)
+						err = fmt.Errorf("cannot  encode watch %q event for object name %q, namespace %q, resourceVersion %q: %w",
+							event.Type, metaObj.GetName(), metaObj.GetNamespace(), rv, err)
+						handleInternalServerError(w, r, err)
 						return
 					}
 					_, _ = fmt.Fprintln(w, eventJson)
@@ -664,7 +671,7 @@ func (s *InMemoryKAPI) currResourceVersion(gvr schema.GroupVersionResource) stri
 
 // createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
 // Consider using unstructured.Unstructured here for generic handling or reflection?
-func createList(d typeinfo.Descriptor, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
+func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
 	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
 	listType, ok := typesMap[string(d.ListKind)]
 	if !ok {
@@ -695,7 +702,16 @@ func createList(d typeinfo.Descriptor, currVersionStr string, items []runtime.Ob
 	itemType := itemsField.Type().Elem() // e.g., v1.Pod
 	resultSlice := reflect.MakeSlice(itemsField.Type(), 0, len(items))
 
+	var metav1Obj metav1.Object
 	for _, obj := range items {
+		metav1Obj, ok = obj.(metav1.Object)
+		if !ok {
+			klog.Warningf("failed to convert %v to metav1.Object", obj)
+			continue
+		}
+		if metav1Obj.GetNamespace() != namespace {
+			continue
+		}
 		val := reflect.ValueOf(obj)
 		if val.Kind() != reflect.Ptr || val.IsNil() {
 			return nil, fmt.Errorf("element for kind %q is not a non-nil pointer: %T", d.Kind, obj)
@@ -768,7 +784,7 @@ func getFlusher(w http.ResponseWriter) http.Flusher {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-		return flusher
+		return nil
 	}
 	return flusher
 }
