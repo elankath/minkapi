@@ -181,7 +181,7 @@ func (s *InMemoryKAPI) handleAPIResources(apiResourceList metav1.APIResourceList
 
 func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -237,7 +237,7 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 
 func (s *InMemoryKAPI) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -257,7 +257,7 @@ func (s *InMemoryKAPI) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 
 func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -277,7 +277,7 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not runtime.Object", objName))
 			return
 		}
-		metav1Obj, ok := obj.(metav1.Object)
+		metaV1Obj, ok := obj.(metav1.Object)
 		if !ok {
 			handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not mtav1.Object", objName))
 			return
@@ -297,7 +297,7 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			Details: &metav1.StatusDetails{
 				Name: objName.String(),
 				Kind: d.GVR.GroupResource().Resource,
-				UID:  metav1Obj.GetUID(),
+				UID:  metaV1Obj.GetUID(),
 			},
 		}
 		writeJsonResponse(w, r, &status)
@@ -319,7 +319,7 @@ func (s *InMemoryKAPI) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc
 }
 func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -343,7 +343,7 @@ func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 }
 func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -389,7 +389,7 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 }
 func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -439,7 +439,7 @@ func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc
 
 func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(d.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
 			return
 		}
@@ -512,7 +512,7 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 // {"kind":"Binding","apiVersion":"v1","metadata":{"name":"a-p4r2l","namespace":"default","uid":"b8124ee8-a0c7-4069-930d-fc5e901675d3"},"target":{"kind":"Node","name":"a-kl827"}}
 func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Request) {
 	d := typeinfo.PodsDescriptor
-	store := s.getStoreOrWriteError(d.GVR, w)
+	store := s.getStoreOrWriteError(d.GVR, w, r)
 	if store == nil {
 		return
 	}
@@ -653,10 +653,14 @@ func (s *InMemoryKAPI) getStore(gvr schema.GroupVersionResource) cache.Store {
 	return s.stores[gvr]
 }
 
-func (s *InMemoryKAPI) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter) (store cache.Store) {
+func (s *InMemoryKAPI) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter, r *http.Request) (store cache.Store) {
 	store = s.getStore(gvr)
 	if store == nil {
-		http.Error(w, "Resource not supported", http.StatusNotFound)
+		klog.Errorf("cannot find store for GVR  %q", gvr)
+		statusErr := apierrors.NewNotFound(gvr.GroupResource(), "STORE")
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		writeJsonResponse(w, r, statusErr.ErrStatus)
 	}
 	return
 }
@@ -708,14 +712,14 @@ func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items [
 	itemType := itemsField.Type().Elem() // e.g., v1.Pod
 	resultSlice := reflect.MakeSlice(itemsField.Type(), 0, len(items))
 
-	var metav1Obj metav1.Object
+	var metaV1Obj metav1.Object
 	for _, obj := range items {
-		metav1Obj, ok = obj.(metav1.Object)
+		metaV1Obj, ok = obj.(metav1.Object)
 		if !ok {
 			klog.Warningf("failed to convert %v to metav1.Object", obj)
 			continue
 		}
-		if namespace != "" && metav1Obj.GetNamespace() != namespace {
+		if namespace != "" && metaV1Obj.GetNamespace() != namespace {
 			continue
 		}
 		val := reflect.ValueOf(obj)
@@ -829,6 +833,7 @@ func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error
 }
 
 func handleBadRequest(w http.ResponseWriter, r *http.Request, err error) {
+	err = fmt.Errorf("cannot handle request %q: %w", r.Method+" "+r.RequestURI, err)
 	klog.Error(err)
 	statusErr := apierrors.NewBadRequest(err.Error())
 	w.WriteHeader(http.StatusBadRequest)
@@ -856,9 +861,9 @@ func GetObjectKey(r *http.Request, d typeinfo.Descriptor) string {
 	return GetObjectName(r, d).String()
 }
 
-func FromAnySlice(anys []any) ([]runtime.Object, error) {
-	result := make([]runtime.Object, 0, len(anys))
-	for _, item := range anys {
+func FromAnySlice(objs []any) ([]runtime.Object, error) {
+	result := make([]runtime.Object, 0, len(objs))
+	for _, item := range objs {
 		obj, ok := item.(runtime.Object)
 		if !ok {
 			return nil, fmt.Errorf("element %T does not implement runtime.Object", item)
