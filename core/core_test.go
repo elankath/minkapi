@@ -23,7 +23,7 @@ func TestCreateList(t *testing.T) {
 	for i := 0; i < len(descriptors); i++ {
 		d := descriptors[i]
 		ol := objLists[i]
-		listObj, err := createList(d, "v1", ol)
+		listObj, err := createList(d, "", "v1", ol)
 		if err != nil {
 			t.Errorf("Failed to create list: %v", err)
 		}

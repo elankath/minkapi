@@ -163,6 +163,18 @@ func TestWatchCSIDrivers(t *testing.T) {
 	listObjects(t, watcher)
 }
 
+func TestWatchPersistentVolumes(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	ctx := context.Background()
+	watcher, err := client.CoreV1().PersistentVolumes().Watch(ctx, metav1.ListOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("failed to create PV watcher: %v", err)
+		return
+	}
+	listObjects(t, watcher)
+}
+
 func TestObjCreationViaScheme(t *testing.T) {
 	//scheme, err := typeinfo.RegisterSchemes()
 	//if err != nil {

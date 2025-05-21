@@ -124,7 +124,7 @@ var (
 	PersistentVolumeClaimsDescriptor = NewDescriptor(PersistentVolumeClaimKind, PersistentVolumeClaimListKind, true, corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), "pvc")
 
 	ReplicationControllersDescriptor = NewDescriptor(ReplicationControllerKind, ReplicationControllerListKind, true, corev1.SchemeGroupVersion.WithResource("replicationcontrollers"), "rc")
-	PriorityClassesDescriptor        = NewDescriptor(PriorityClassKind, PriorityClassListKind, false, schedulingv1.SchemeGroupVersion.WithResource("priorityclasses"))
+	PriorityClassesDescriptor        = NewDescriptor(PriorityClassKind, PriorityClassListKind, false, schedulingv1.SchemeGroupVersion.WithResource("priorityclasses"), "pc")
 
 	LeaseDescriptor = NewDescriptor(LeaseKind, LeaseListKind, true, coordinationv1.SchemeGroupVersion.WithResource("leases"))
 

@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/elankath/minkapi/api"
 	"github.com/elankath/minkapi/core/podutil"
@@ -35,8 +36,8 @@ type InMemoryKAPI struct {
 	mux       *http.ServeMux
 	storeLock sync.Mutex
 	stores    map[schema.GroupVersionResource]cache.Store
-	versions  map[schema.GroupVersionResource]int64 // GVR -> latest resourceVersion
-	watchers  map[schema.GroupVersionResource]map[string]chan watch.Event
+	versions  map[schema.GroupVersionResource]int64                       // GVR -> latest resourceVersion
+	watchers  map[schema.GroupVersionResource]map[string]chan watch.Event // GVR->namespace->event channel
 	watchLock sync.Mutex
 	server    *http.Server
 }
@@ -68,7 +69,7 @@ func (s *InMemoryKAPI) GetMux() *http.ServeMux {
 
 // Start begins the HTTP server
 func (s *InMemoryKAPI) Start() error {
-	if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return fmt.Errorf("server failed: %v", err)
 	}
 	return nil
@@ -178,18 +179,18 @@ func (s *InMemoryKAPI) handleAPIResources(apiResourceList metav1.APIResourceList
 	}
 }
 
-func (s *InMemoryKAPI) handleCreate(descriptor typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		store := s.getStoreOrWriteError(descriptor.GVR, w)
+		store := s.getStoreOrWriteError(d.GVR, w)
 		if store == nil {
 			return
 		}
 		var obj metav1.Object
 		var err error
-		obj, err = descriptor.CreateObject()
+		obj, err = d.CreateObject()
 
 		if err != nil {
-			err = fmt.Errorf("cannot create object from GVK %q: %v", descriptor.GVK, err)
+			err = fmt.Errorf("cannot create object from GVK %q: %v", d.GVK, err)
 			handleInternalServerError(w, r, err)
 			return
 		}
@@ -198,25 +199,30 @@ func (s *InMemoryKAPI) handleCreate(descriptor typeinfo.Descriptor) http.Handler
 			return
 		}
 
-		namespace := getNamespace(r)
+		namespace := r.PathValue("namespace")
+		if obj.GetNamespace() == "" {
+			namespace = GetObjectName(r, d).Namespace
+			obj.SetNamespace(namespace)
+		} else {
+			namespace = obj.GetNamespace()
+		}
 		name := obj.GetName()
 		namePrefix := obj.GetGenerateName()
 		if name == "" {
 			if namePrefix == "" {
-				err = fmt.Errorf("missing both name and generateName in request for creating object of GVK %q in %q namespace", descriptor.GVK, namespace)
+				err = fmt.Errorf("missing both name and generateName in request for creating object of GVK %q in %q namespace", d.GVK, namespace)
 				handleBadRequest(w, r, err)
 				return
 			}
 			name = typeinfo.GenerateName(namePrefix)
 		}
-
 		obj.SetName(name)
-		if obj.GetNamespace() == "" {
-			obj.SetNamespace(namespace)
-		}
-		obj.SetResourceVersion(s.nextResourceVersion(descriptor.GVR))
+
+		obj.SetResourceVersion(s.nextResourceVersion(d.GVR))
 		obj.SetCreationTimestamp(metav1.Now())
-		obj.SetUID(uuid.NewUUID())
+		if obj.GetUID() == "" {
+			obj.SetUID(uuid.NewUUID())
+		}
 
 		err = store.Add(obj)
 		if err != nil {
@@ -224,7 +230,7 @@ func (s *InMemoryKAPI) handleCreate(descriptor typeinfo.Descriptor) http.Handler
 			handleInternalServerError(w, r, err)
 			return
 		}
-		s.broadcastEvent(descriptor.GVR, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
+		s.broadcastEvent(d.GVR, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
 		writeJsonResponse(w, r, obj)
 	}
 }
@@ -235,7 +241,7 @@ func (s *InMemoryKAPI) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 		if store == nil {
 			return
 		}
-		key := GetObjectKey(r)
+		key := GetObjectKey(r, d)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
 			handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
@@ -256,7 +262,7 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			return
 		}
 
-		objName := GetObjectName(r)
+		objName := GetObjectName(r, d)
 		obj, exists, err := store.GetByKey(objName.String())
 		if err != nil {
 			handleInternalServerError(w, r, fmt.Errorf("cannot get object with key %q from store: %w", objName, err))
@@ -317,7 +323,7 @@ func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 		if store == nil {
 			return
 		}
-		namespace := getNamespace(r)
+		namespace := r.PathValue("namespace")
 		items := store.List()
 		currentVersionStr := fmt.Sprintf("%d", s.getCurrentVersion(d.GVR))
 		objItems, err := FromAnySlice(items)
@@ -341,7 +347,7 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 		if store == nil {
 			return
 		}
-		key := GetObjectKey(r)
+		key := GetObjectKey(r, d)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
 			err = fmt.Errorf("cannot get obj by key %q: %w", key, err)
@@ -388,7 +394,7 @@ func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc
 			return
 		}
 
-		key := GetObjectKey(r)
+		key := GetObjectKey(r, d)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
 			err = fmt.Errorf("cannot get obj by key %q: %w", key, err)
@@ -442,7 +448,7 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 		var startVersion, currentVersion int64
 		var namespace string
 
-		namespace = getNamespace(r)
+		namespace = r.PathValue("namespace")
 		startVersion, ok = getParseResourceVersion(w, r)
 		if !ok {
 			return
@@ -500,7 +506,7 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 
 // handleCreatePodBinding is meant to handle creation for a Pod binding.
 // Ex: POST http://localhost:8080/api/v1/namespaces/default/pods/a-mc6zl/binding
-// This endpoint is invoked by the scheduler and it is expected that the API Server sets the `pod.Spec.NodeName`
+// This endpoint is invoked by the scheduler, and it is expected that the API Server sets the `pod.Spec.NodeName`
 //
 // Example Payload
 // {"kind":"Binding","apiVersion":"v1","metadata":{"name":"a-p4r2l","namespace":"default","uid":"b8124ee8-a0c7-4069-930d-fc5e901675d3"},"target":{"kind":"Node","name":"a-kl827"}}
@@ -514,7 +520,7 @@ func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 	if !readBodyIntoObj(w, r, &binding) {
 		return
 	}
-	key := GetObjectKey(r)
+	key := GetObjectKey(r, d)
 	obj, exists, err := store.GetByKey(key)
 	if err != nil {
 		handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
@@ -669,7 +675,7 @@ func (s *InMemoryKAPI) currResourceVersion(gvr schema.GroupVersionResource) stri
 	return strconv.FormatInt(s.versions[gvr], 10)
 }
 
-// createList creates the Kind specific list (PodList, etc) and returns the same as a runtime.Object.
+// createList creates the Kind specific list (PodList, etc.) and returns the same as a runtime.Object.
 // Consider using unstructured.Unstructured here for generic handling or reflection?
 func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
 	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
@@ -709,7 +715,7 @@ func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items [
 			klog.Warningf("failed to convert %v to metav1.Object", obj)
 			continue
 		}
-		if metav1Obj.GetNamespace() != namespace {
+		if namespace != "" && metav1Obj.GetNamespace() != namespace {
 			continue
 		}
 		val := reflect.ValueOf(obj)
@@ -738,14 +744,6 @@ func writeJsonResponse(w http.ResponseWriter, r *http.Request, obj any) {
 		klog.Errorf("Failed to encode %s response: %v", r.URL.Path, err)
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 	}
-}
-
-func getNamespace(r *http.Request) (ns string) {
-	ns = r.PathValue("namespace")
-	if ns == "" {
-		ns = "default"
-	}
-	return
 }
 
 func getParseResourceVersion(w http.ResponseWriter, r *http.Request) (resourceVersion int64, ok bool) {
@@ -846,13 +844,16 @@ func handleNotFound(w http.ResponseWriter, r *http.Request, gr schema.GroupVersi
 	writeJsonResponse(w, r, statusErr.ErrStatus)
 }
 
-func GetObjectName(r *http.Request) cache.ObjectName {
-	namespace := getNamespace(r)
+func GetObjectName(r *http.Request, d typeinfo.Descriptor) cache.ObjectName {
+	namespace := r.PathValue("namespace")
+	if namespace == "" && d.APIResource.Namespaced {
+		namespace = "default"
+	}
 	name := r.PathValue("name")
 	return cache.NewObjectName(namespace, name)
 }
-func GetObjectKey(r *http.Request) string {
-	return GetObjectName(r).String()
+func GetObjectKey(r *http.Request, d typeinfo.Descriptor) string {
+	return GetObjectName(r, d).String()
 }
 
 func FromAnySlice(anys []any) ([]runtime.Object, error) {
