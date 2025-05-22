@@ -469,7 +469,7 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 		}
 
 		ch := s.createWatchChan(d, namespace)
-		watchTimeout := 5 * time.Minute
+		watchTimeout := 30 * time.Second
 		for {
 			select {
 			case event := <-ch:
@@ -627,9 +627,9 @@ func (s *InMemoryKAPI) broadcastEvent(d typeinfo.Descriptor, namespace string, e
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 
-	if namespace == "" && d.APIResource.Namespaced {
-		namespace = "default"
-	}
+	//if namespace == "" && d.APIResource.Namespaced {
+	//	namespace = "default"
+	//}
 
 	if nsWatchers, ok := s.watchers[d.GVR]; ok {
 		if ch, ok := nsWatchers[namespace]; ok {
