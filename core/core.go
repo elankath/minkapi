@@ -230,7 +230,7 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 			handleInternalServerError(w, r, err)
 			return
 		}
-		s.broadcastEvent(d.GVR, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
+		s.broadcastEvent(d, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
 		writeJsonResponse(w, r, obj)
 	}
 }
@@ -287,7 +287,7 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			handleInternalServerError(w, r, fmt.Errorf("cannot delete object with key %q: %w", objName, err))
 			return
 		}
-		s.broadcastEvent(d.GVR, objName.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
+		s.broadcastEvent(d, objName.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
 		status := metav1.Status{
 			TypeMeta: metav1.TypeMeta{ //No idea why this is explicitly needed just for this payload, but kubectl complains
 				Kind:       "Status",
@@ -468,12 +468,16 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 			}
 		}
 
-		ch := s.createWatchChan(d.GVR, namespace)
-		watchTimeout := 2 * time.Minute
+		ch := s.createWatchChan(d, namespace)
+		watchTimeout := 5 * time.Minute
 		for {
 			select {
 			case event := <-ch:
-				metaObj := event.Object.(metav1.Object)
+				metaObj, ok := event.Object.(metav1.Object)
+				if !ok {
+					klog.Errorf("failed to cast event.Object to metav1.Object %v", event.Object)
+					continue
+				}
 				rv, _ := strconv.ParseInt(metaObj.GetResourceVersion(), 10, 64)
 				if rv > startVersion {
 					eventJson, err := buildWatchEventJson(&event)
@@ -561,7 +565,11 @@ func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace stri
 		var obj metav1.Object
 		var rv int64
 		obj, ok = item.(metav1.Object)
-		if !ok || obj.GetNamespace() != namespace {
+		if !ok {
+			klog.Errorf("failed to cast item.Object to metav1.Object: %v", item)
+			continue
+		}
+		if namespace != "" && obj.GetNamespace() != namespace {
 			continue
 		}
 		rv, err := parseObjectResourceVersion(obj)
@@ -600,27 +608,35 @@ func (s *InMemoryKAPI) getCurrentVersion(gvr schema.GroupVersionResource) int64 
 	return currentVersion
 }
 
-func (s *InMemoryKAPI) createWatchChan(gvr schema.GroupVersionResource, namespace string) chan watch.Event {
+func (s *InMemoryKAPI) createWatchChan(d typeinfo.Descriptor, namespace string) chan watch.Event {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
-	if _, ok := s.watchers[gvr]; !ok {
-		s.watchers[gvr] = make(map[string]chan watch.Event)
+	if namespace == "" && d.APIResource.Namespaced {
+		namespace = "default"
 	}
-	ch := make(chan watch.Event, 10)
-	s.watchers[gvr][namespace] = ch
+	if _, ok := s.watchers[d.GVR]; !ok {
+		s.watchers[d.GVR] = make(map[string]chan watch.Event)
+	}
+	ch := make(chan watch.Event, 300)
+	s.watchers[d.GVR][namespace] = ch
 	return ch
 }
 
 // broadcastEvent sends an event to all watchers for a GVR and namespace
-func (s *InMemoryKAPI) broadcastEvent(gvr schema.GroupVersionResource, namespace string, event watch.Event) {
+func (s *InMemoryKAPI) broadcastEvent(d typeinfo.Descriptor, namespace string, event watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
 
-	if nsWatchers, ok := s.watchers[gvr]; ok {
+	if namespace == "" && d.APIResource.Namespaced {
+		namespace = "default"
+	}
+
+	if nsWatchers, ok := s.watchers[d.GVR]; ok {
 		if ch, ok := nsWatchers[namespace]; ok {
 			select {
 			case ch <- event:
 			default:
+				klog.Errorf("cannot broadcast event to namespace %s for event type %s - channel full?", namespace, event.Type)
 			}
 		}
 	}

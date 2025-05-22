@@ -139,6 +139,30 @@ func TestWatchNodes(t *testing.T) {
 	listObjects(t, watcher)
 }
 
+func TestWatchPods(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	ctx := context.Background()
+	watcher, err := client.CoreV1().Pods("").Watch(ctx, metav1.ListOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("failed to create pods watcher: %v", err)
+		return
+	}
+	listObjects(t, watcher)
+}
+
+func TestWatchEvents(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	ctx := context.Background()
+	watcher, err := client.EventsV1().Events("").Watch(ctx, metav1.ListOptions{Watch: true})
+	if err != nil {
+		t.Fatalf("failed to create event watcher: %v", err)
+		return
+	}
+	listObjects(t, watcher)
+}
+
 func TestWatchStorageClass(t *testing.T) {
 	client := createKubeClient(t)
 	t.Logf("Created kubernetes client")
@@ -233,4 +257,42 @@ func getKubeConfigPath() string {
 		kubeConfigPath = "/tmp/minkapi.yaml"
 	}
 	return kubeConfigPath
+}
+func TestSharedInformerPod(t *testing.T) {
+	client := createKubeClient(t)
+	t.Logf("Created kubernetes client")
+	factory := informers.NewSharedInformerFactory(client, 30*time.Second)
+	podInformer := factory.Core().V1().Pods().Informer()
+	_, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			p := obj.(*corev1.Pod)
+			t.Logf("[ADD] Pod: %s\n", p.Name)
+		},
+		UpdateFunc: func(oldObj, newObj interface{}) {
+			newP := newObj.(*corev1.Pod)
+			t.Logf("[UPDATE] Pod: %s\n", newP.Name)
+		},
+		DeleteFunc: func(obj interface{}) {
+			p := obj.(*corev1.Pod)
+			t.Logf("[DELETE] Pod: %s\n", p.Name)
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to add handler for Pods: %v", err)
+	}
+
+	stopCh := make(chan struct{})
+	defer close(stopCh)
+	// Start informers
+	factory.Start(stopCh)
+
+	// Wait for initial cache sync
+	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {
+		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		return
+	}
+
+	t.Logf("PodInformer informer running...")
+	<-stopCh
+
 }
