@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"github.com/elankath/minkapi/api"
 	"github.com/elankath/minkapi/core"
 	"k8s.io/klog/v2"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 )
@@ -15,7 +18,14 @@ func main() {
 	if err != nil {
 		klog.Fatalf("failed to initialize InMemoryKAPI: %v", err)
 	}
-	klog.Info("Kubernetes API InMemoryKAPI running on :8080")
+	info, ok := debug.ReadBuildInfo()
+	if ok {
+		if info.Main.Version != "" {
+			fmt.Printf("%s version: %s\n", api.ProgramName, info.Main.Version)
+		}
+	} else {
+		fmt.Printf("%s: binary build info not embedded", api.ProgramName)
+	}
 
 	// Set up signal handling
 	sigCh := make(chan os.Signal, 1)
@@ -24,7 +34,7 @@ func main() {
 	// Start the server in a goroutine
 	go func() {
 		if err := server.Start(); err != nil {
-			klog.Errorf("Server failed: %v", err)
+			klog.Errorf("%s server failed: %v", api.ProgramName, err)
 			os.Exit(1)
 		}
 	}()

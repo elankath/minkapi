@@ -69,8 +69,9 @@ func (s *InMemoryKAPI) GetMux() *http.ServeMux {
 
 // Start begins the HTTP server
 func (s *InMemoryKAPI) Start() error {
+	klog.Infof("%s server running on %s", api.ProgramName, s.server.Addr)
 	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("server failed: %v", err)
+		return fmt.Errorf("%s server failed: %v", api.ProgramName, err)
 	}
 	return nil
 }
@@ -475,7 +476,7 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 			case event := <-ch:
 				metaObj, ok := event.Object.(metav1.Object)
 				if !ok {
-					klog.Errorf("failed to cast event.Object to metav1.Object %v", event.Object)
+					//klog.Errorf("failed to cast event.Object to metav1.Object %v", event.Object)
 					continue
 				}
 				rv, _ := strconv.ParseInt(metaObj.GetResourceVersion(), 10, 64)
