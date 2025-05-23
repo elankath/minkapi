@@ -20,6 +20,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
+	"net"
 	"net/http"
 	"os"
 	"reflect"
@@ -42,7 +43,7 @@ type InMemoryKAPI struct {
 	server    *http.Server
 }
 
-func NewInMemoryMinKAPI() (*InMemoryKAPI, error) {
+func NewInMemoryMinKAPI(appCtx context.Context) (*InMemoryKAPI, error) {
 	mux := http.NewServeMux()
 	stores := map[schema.GroupVersionResource]cache.Store{}
 	for _, sd := range typeinfo.SupportedDescriptors {
@@ -54,7 +55,13 @@ func NewInMemoryMinKAPI() (*InMemoryKAPI, error) {
 		versions: make(map[schema.GroupVersionResource]int64, 100),
 		scheme:   typeinfo.SupportedScheme,
 		mux:      mux,
-		server:   &http.Server{Addr: ":8080", Handler: mux},
+		server: &http.Server{
+			Addr:    ":8080",
+			Handler: mux,
+			BaseContext: func(_ net.Listener) context.Context {
+				return appCtx
+			},
+		},
 	}
 	s.registerRoutes()
 	if err := s.generateKubeconfig(); err != nil {
@@ -78,7 +85,7 @@ func (s *InMemoryKAPI) Start() error {
 
 // Shutdown cleans up resources and shuts down the HTTP server
 func (s *InMemoryKAPI) Shutdown(ctx context.Context) error {
-	s.closeWatches()
+	//s.closeWatches()
 	return s.server.Shutdown(ctx)
 }
 
@@ -87,8 +94,8 @@ func (s *InMemoryKAPI) closeWatches() {
 	defer s.watchLock.Unlock()
 	for gvr, nsWatchers := range s.watchers {
 		for ns, ch := range nsWatchers {
-			close(ch)
 			delete(nsWatchers, ns)
+			close(ch)
 		}
 		delete(s.watchers, gvr)
 	}
@@ -231,7 +238,7 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 			handleInternalServerError(w, r, err)
 			return
 		}
-		s.broadcastEvent(d, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
+		go s.broadcastEvent(d, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
 		writeJsonResponse(w, r, obj)
 	}
 }
@@ -288,7 +295,7 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			handleInternalServerError(w, r, fmt.Errorf("cannot delete object with key %q: %w", objName, err))
 			return
 		}
-		s.broadcastEvent(d, objName.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
+		go s.broadcastEvent(d, objName.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
 		status := metav1.Status{
 			TypeMeta: metav1.TypeMeta{ //No idea why this is explicitly needed just for this payload, but kubectl complains
 				Kind:       "Status",
@@ -541,7 +548,7 @@ func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 		Type:   corev1.PodScheduled,
 		Status: corev1.ConditionTrue,
 	})
-	klog.Infof("assigned pod %s to node %s", pod.Name, pod.Spec.NodeName)
+	klog.V(4).Infof("assigned pod %s to node %s", pod.Name, pod.Spec.NodeName)
 	err = store.Update(obj)
 	if err != nil {
 		err = fmt.Errorf("cannot update object %q in store: %w", key, err)
@@ -618,7 +625,7 @@ func (s *InMemoryKAPI) createWatchChan(d typeinfo.Descriptor, namespace string) 
 	if _, ok := s.watchers[d.GVR]; !ok {
 		s.watchers[d.GVR] = make(map[string]chan watch.Event)
 	}
-	ch := make(chan watch.Event, 300)
+	ch := make(chan watch.Event, 100)
 	s.watchers[d.GVR][namespace] = ch
 	return ch
 }
@@ -627,10 +634,6 @@ func (s *InMemoryKAPI) createWatchChan(d typeinfo.Descriptor, namespace string) 
 func (s *InMemoryKAPI) broadcastEvent(d typeinfo.Descriptor, namespace string, event watch.Event) {
 	s.watchLock.Lock()
 	defer s.watchLock.Unlock()
-
-	//if namespace == "" && d.APIResource.Namespaced {
-	//	namespace = "default"
-	//}
 
 	if nsWatchers, ok := s.watchers[d.GVR]; ok {
 		if ch, ok := nsWatchers[namespace]; ok {

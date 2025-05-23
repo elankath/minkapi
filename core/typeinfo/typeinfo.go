@@ -293,6 +293,10 @@ func buildAPIGroupList() metav1.APIGroupList {
 					Version:      d.GVK.Version,
 				},
 			},
+			PreferredVersion: metav1.GroupVersionForDiscovery{
+				GroupVersion: d.GVK.GroupVersion().String(),
+				Version:      d.GVK.Version,
+			},
 		}
 	}
 	return metav1.APIGroupList{

@@ -14,10 +14,6 @@ import (
 )
 
 func main() {
-	server, err := core.NewInMemoryMinKAPI()
-	if err != nil {
-		klog.Fatalf("failed to initialize InMemoryKAPI: %v", err)
-	}
 	info, ok := debug.ReadBuildInfo()
 	if ok {
 		if info.Main.Version != "" {
@@ -27,28 +23,33 @@ func main() {
 		fmt.Printf("%s: binary build info not embedded", api.ProgramName)
 	}
 
-	// Set up signal handling
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	appCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
-	// Start the server in a goroutine
+	service, err := core.NewInMemoryMinKAPI(appCtx)
+	if err != nil {
+		klog.Error("failed to initialize InMemoryKAPI: %v", err)
+		return
+	}
+	// Start the service in a goroutine
 	go func() {
-		if err := server.Start(); err != nil {
-			klog.Errorf("%s server failed: %v", api.ProgramName, err)
+		if err := service.Start(); err != nil {
+			klog.Errorf("%s service failed: %v", api.ProgramName, err)
 			os.Exit(1)
 		}
 	}()
 
 	// Wait for a signal
-	<-sigCh
+	<-appCtx.Done()
+	stop()
 	klog.Warning("Received shutdown signal, initiating graceful shutdown...")
 
 	// Create a context with a 5-second timeout for shutdown
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	shutDownCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
 	defer cancel()
 
 	// Perform shutdown
-	if err := server.Shutdown(ctx); err != nil {
+	if err := service.Shutdown(shutDownCtx); err != nil {
 		klog.Errorf("Kubernetes API InMemoryKAPI Shutdown failed: %v", err)
 		os.Exit(1)
 	}
