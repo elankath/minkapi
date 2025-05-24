@@ -6,11 +6,14 @@ import (
 	"errors"
 	"fmt"
 	"github.com/elankath/minkapi/api"
+	"github.com/elankath/minkapi/core/configtmpl"
 	"github.com/elankath/minkapi/core/podutil"
 	"github.com/elankath/minkapi/core/typeinfo"
+	"github.com/go-logr/logr"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -19,13 +22,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/klog/v2"
+	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"reflect"
 	"strconv"
 	"sync"
+	"text/template"
 	"time"
 )
 
@@ -33,30 +36,36 @@ var _ api.MinKAPIAccess = (*InMemoryKAPI)(nil)
 
 // InMemoryKAPI holds the in-memory stores, watch channels, and version tracking for simple implementation of api.MinKAPIAccess
 type InMemoryKAPI struct {
-	scheme    *runtime.Scheme
-	mux       *http.ServeMux
-	storeLock sync.Mutex
-	stores    map[schema.GroupVersionResource]cache.Store
-	versions  map[schema.GroupVersionResource]int64                       // GVR -> latest resourceVersion
-	watchers  map[schema.GroupVersionResource]map[string]chan watch.Event // GVR->namespace->event channel
-	watchLock sync.Mutex
-	server    *http.Server
+	cfg            api.MinKAPIConfig
+	log            logr.Logger
+	scheme         *runtime.Scheme
+	mux            *http.ServeMux
+	storeLock      sync.Mutex
+	stores         map[schema.GroupVersionResource]cache.Store
+	versions       map[schema.GroupVersionResource]int64                       // GVR -> latest resourceVersion
+	watchers       map[schema.GroupVersionResource]map[string]chan watch.Event // GVR->namespace->event channel
+	watchLock      sync.Mutex
+	kubeConfigTmpl *template.Template
+	listenerAddr   net.Addr
+	server         *http.Server
 }
 
-func NewInMemoryMinKAPI(appCtx context.Context) (*InMemoryKAPI, error) {
+func NewInMemoryMinKAPI(appCtx context.Context, cfg api.MinKAPIConfig, log logr.Logger) (*InMemoryKAPI, error) {
 	mux := http.NewServeMux()
 	stores := map[schema.GroupVersionResource]cache.Store{}
 	for _, sd := range typeinfo.SupportedDescriptors {
 		stores[sd.GVR] = cache.NewStore(cache.MetaNamespaceKeyFunc)
 	}
 	s := &InMemoryKAPI{
+		cfg:      cfg,
+		log:      log,
 		stores:   stores,
 		watchers: make(map[schema.GroupVersionResource]map[string]chan watch.Event, 100),
 		versions: make(map[schema.GroupVersionResource]int64, 100),
 		scheme:   typeinfo.SupportedScheme,
 		mux:      mux,
 		server: &http.Server{
-			Addr:    ":8080",
+			Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
 			Handler: mux,
 			BaseContext: func(_ net.Listener) context.Context {
 				return appCtx
@@ -64,9 +73,6 @@ func NewInMemoryMinKAPI(appCtx context.Context) (*InMemoryKAPI, error) {
 		},
 	}
 	s.registerRoutes()
-	if err := s.generateKubeconfig(); err != nil {
-		return nil, fmt.Errorf("failed to generate kubeconfig: %w", err)
-	}
 	return s, nil
 }
 
@@ -76,9 +82,23 @@ func (s *InMemoryKAPI) GetMux() *http.ServeMux {
 
 // Start begins the HTTP server
 func (s *InMemoryKAPI) Start() error {
-	klog.Infof("%s server running on %s", api.ProgramName, s.server.Addr)
-	if err := s.server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("%s server failed: %v", api.ProgramName, err)
+	// We do this because we want the bind address
+	listener, err := net.Listen("tcp", s.server.Addr)
+	if err != nil {
+		return fmt.Errorf("%w: cannot listen on TCP Address %q: %w", api.ErrStartFailed, s.server.Addr, err)
+	}
+	s.listenerAddr = listener.Addr()
+	err = configtmpl.GenKubeConfig(configtmpl.KubeConfigParams{
+		KubeConfigPath: s.cfg.KubeConfigPath,
+		URL:            "http://" + s.listenerAddr.String(),
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %w", api.ErrStartFailed, err)
+	}
+	s.log.Info("kubeconfig generated", "path", s.cfg.KubeConfigPath)
+	s.log.Info(fmt.Sprintf("%s service listening", api.ProgramName), "address", s.server.Addr)
+	if err := s.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("%w: %w", api.ErrServiceFailed, err)
 	}
 	return nil
 }
@@ -165,7 +185,7 @@ func (s *InMemoryKAPI) handleAPIGroups(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJsonResponse(w, r, &typeinfo.SupportedAPIGroups)
+	writeJsonResponse(s.log, w, r, &typeinfo.SupportedAPIGroups)
 }
 
 // handleAPIVersions returns the list of versions for the core API group
@@ -174,7 +194,7 @@ func (s *InMemoryKAPI) handleAPIVersions(w http.ResponseWriter, r *http.Request)
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	writeJsonResponse(w, r, &typeinfo.SupportedAPIVersions)
+	writeJsonResponse(s.log, w, r, &typeinfo.SupportedAPIVersions)
 }
 
 func (s *InMemoryKAPI) handleAPIResources(apiResourceList metav1.APIResourceList) http.HandlerFunc {
@@ -183,7 +203,7 @@ func (s *InMemoryKAPI) handleAPIResources(apiResourceList metav1.APIResourceList
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		writeJsonResponse(w, r, apiResourceList)
+		writeJsonResponse(s.log, w, r, apiResourceList)
 	}
 }
 
@@ -199,11 +219,11 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 
 		if err != nil {
 			err = fmt.Errorf("cannot create object from GVK %q: %v", d.GVK, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 
-		if !readBodyIntoObj(w, r, obj) {
+		if !s.readBodyIntoObj(w, r, obj) {
 			return
 		}
 
@@ -219,7 +239,7 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 		if name == "" {
 			if namePrefix == "" {
 				err = fmt.Errorf("missing both name and generateName in request for creating object of GVK %q in %q namespace", d.GVK, namespace)
-				handleBadRequest(w, r, err)
+				s.handleBadRequest(w, r, err)
 				return
 			}
 			name = typeinfo.GenerateName(namePrefix)
@@ -227,7 +247,10 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 		obj.SetName(name)
 
 		obj.SetResourceVersion(s.nextResourceVersion(d.GVR))
-		obj.SetCreationTimestamp(metav1.Now())
+		createTimestamp := obj.GetCreationTimestamp()
+		if (&createTimestamp).IsZero() { // only set creationTimestamp if not already set.
+			obj.SetCreationTimestamp(metav1.Time{Time: time.Now()})
+		}
 		if obj.GetUID() == "" {
 			obj.SetUID(uuid.NewUUID())
 		}
@@ -235,11 +258,11 @@ func (s *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 		err = store.Add(obj)
 		if err != nil {
 			err = fmt.Errorf("error adding object %q to store: %v", cache.NewObjectName(namespace, name), err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		go s.broadcastEvent(d, namespace, watch.Event{Type: watch.Added, Object: obj.(runtime.Object)})
-		writeJsonResponse(w, r, obj)
+		writeJsonResponse(s.log, w, r, obj)
 	}
 }
 
@@ -252,14 +275,14 @@ func (s *InMemoryKAPI) handleGet(d typeinfo.Descriptor) http.HandlerFunc {
 		key := GetObjectKey(r, d)
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
-			handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
+			s.handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
 			return
 		}
 		if !exists {
-			handleNotFound(w, r, d.GVR, key)
+			s.handleNotFound(w, r, d.GVR, key)
 			return
 		}
-		writeJsonResponse(w, r, obj)
+		writeJsonResponse(s.log, w, r, obj)
 	}
 }
 
@@ -273,26 +296,27 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 		objName := GetObjectName(r, d)
 		obj, exists, err := store.GetByKey(objName.String())
 		if err != nil {
-			handleInternalServerError(w, r, fmt.Errorf("cannot get object with key %q from store: %w", objName, err))
+			s.handleInternalServerError(w, r, fmt.Errorf("cannot get object with key %q from store: %w", objName, err))
 			return
 		}
 		if !exists {
-			handleNotFound(w, r, d.GVR, objName.String())
+			s.handleNotFound(w, r, d.GVR, objName.String())
 			return
 		}
 		runtimeObj, ok := obj.(runtime.Object)
 		if !ok {
-			handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not runtime.Object", objName))
+			s.handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not runtime.Object", objName))
 			return
 		}
-		metaV1Obj, ok := obj.(metav1.Object)
-		if !ok {
-			handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not mtav1.Object", objName))
+		metaV1Obj, err := meta.Accessor(runtimeObj)
+		if err != nil {
+			s.handleInternalServerError(w, r, fmt.Errorf("stored object with key %q is not metav1.Object: %w", objName, err))
 			return
 		}
+		metaV1Obj.SetDeletionTimestamp(&metav1.Time{Time: time.Time{}})
 		err = store.Delete(obj)
 		if err != nil {
-			handleInternalServerError(w, r, fmt.Errorf("cannot delete object with key %q: %w", objName, err))
+			s.handleInternalServerError(w, r, fmt.Errorf("cannot delete object with key %q: %w", objName, err))
 			return
 		}
 		go s.broadcastEvent(d, objName.Namespace, watch.Event{Type: watch.Deleted, Object: runtimeObj})
@@ -308,7 +332,7 @@ func (s *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 				UID:  metaV1Obj.GetUID(),
 			},
 		}
-		writeJsonResponse(w, r, &status)
+		writeJsonResponse(s.log, w, r, &status)
 	}
 }
 
@@ -337,16 +361,16 @@ func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 		objItems, err := FromAnySlice(items)
 		if err != nil {
 			statusErr := apierrors.NewInternalError(err)
-			writeStatusError(w, r, statusErr)
+			writeStatusError(s.log, w, r, statusErr)
 			return
 		}
-		list, err := createList(d, namespace, currentVersionStr, objItems)
+		list, err := createList(s.log, d, namespace, currentVersionStr, objItems)
 		if err != nil {
 			statusErr := apierrors.NewInternalError(err)
-			writeStatusError(w, r, statusErr)
+			writeStatusError(s.log, w, r, statusErr)
 			return
 		}
-		writeJsonResponse(w, r, list)
+		writeJsonResponse(s.log, w, r, list)
 	}
 }
 func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
@@ -359,29 +383,29 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
 			err = fmt.Errorf("cannot get obj by key %q: %w", key, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		if !exists {
-			handleNotFound(w, r, d.GVR, key)
+			s.handleNotFound(w, r, d.GVR, key)
 			return
 		}
 		contentType := r.Header.Get("Content-Type")
 		if contentType != "application/strategic-merge-patch+json" {
 			err = fmt.Errorf("unsupported content type %q for obj %q", contentType, key)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		patchData, err := io.ReadAll(r.Body)
 		if err != nil {
 			statusErr := apierrors.NewInternalError(err)
-			writeStatusError(w, r, statusErr)
+			writeStatusError(s.log, w, r, statusErr)
 			return
 		}
 		err = patchObject(obj.(runtime.Object), key, patchData)
 		if err != nil {
 			err = fmt.Errorf("failed to atch obj %q: %w", key, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		metaObj := obj.(metav1.Object)
@@ -389,10 +413,10 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 		err = store.Update(obj)
 		if err != nil {
 			err = fmt.Errorf("cannot update object %q in store: %w", key, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
-		writeJsonResponse(w, r, obj)
+		writeJsonResponse(s.log, w, r, obj)
 	}
 }
 func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc {
@@ -406,31 +430,31 @@ func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc
 		obj, exists, err := store.GetByKey(key)
 		if err != nil {
 			err = fmt.Errorf("cannot get obj by key %q: %w", key, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		if !exists {
-			handleNotFound(w, r, d.GVR, key)
+			s.handleNotFound(w, r, d.GVR, key)
 			return
 		}
 		contentType := r.Header.Get("Content-Type")
 		if contentType != "application/strategic-merge-patch+json" {
 			err = fmt.Errorf("unsupported content type %q for obj %q", contentType, key)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 
 		patchData, err := io.ReadAll(r.Body)
 		if err != nil {
 			err = fmt.Errorf("failed to read patch body for obj %q", key)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		runtimeObj := obj.(runtime.Object)
 		err = patchStatus(runtimeObj, key, patchData)
 		if err != nil {
 			err = fmt.Errorf("failed to atch status for obj %q: %w", key, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		metaObj := obj.(metav1.Object)
@@ -438,10 +462,10 @@ func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc
 		err = store.Update(obj)
 		if err != nil {
 			err = fmt.Errorf("cannot update object %q in store: %w", key, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
-		writeJsonResponse(w, r, obj)
+		writeJsonResponse(s.log, w, r, obj)
 	}
 }
 
@@ -470,30 +494,30 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 		}
 		currentVersion = s.getCurrentVersion(d.GVR)
 		if startVersion < currentVersion {
-			ok = sendPendingAddEvents(w, r, namespace, startVersion, store.List())
+			ok = s.sendPendingAddEvents(w, r, namespace, startVersion, store.List())
 			if !ok {
 				return
 			}
 		}
 
 		ch := s.createWatchChan(d, namespace)
-		watchTimeout := 30 * time.Second
+		watchTimeout := s.cfg.WatchTimeout
 		for {
 			select {
 			case event := <-ch:
-				metaObj, ok := event.Object.(metav1.Object)
-				if !ok {
-					//klog.Errorf("failed to cast event.Object to metav1.Object %v", event.Object)
+				metaObj, err := meta.Accessor(event.Object)
+				if err != nil {
+					s.log.Error(err, "could not process event object", "eventObject", event.Object)
 					continue
 				}
 				rv, _ := strconv.ParseInt(metaObj.GetResourceVersion(), 10, 64)
 				if rv > startVersion {
-					eventJson, err := buildWatchEventJson(&event)
+					eventJson, err := buildWatchEventJson(s.log, &event)
 					if err != nil {
 						s.removeWatch(d.GVR, namespace, ch)
 						err = fmt.Errorf("cannot  encode watch %q event for object name %q, namespace %q, resourceVersion %q: %w",
 							event.Type, metaObj.GetName(), metaObj.GetNamespace(), rv, err)
-						handleInternalServerError(w, r, err)
+						s.handleInternalServerError(w, r, err)
 						return
 					}
 					_, _ = fmt.Fprintln(w, eventJson)
@@ -529,17 +553,17 @@ func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 		return
 	}
 	binding := corev1.Binding{}
-	if !readBodyIntoObj(w, r, &binding) {
+	if !s.readBodyIntoObj(w, r, &binding) {
 		return
 	}
 	key := GetObjectKey(r, d)
 	obj, exists, err := store.GetByKey(key)
 	if err != nil {
-		handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
+		s.handleInternalServerError(w, r, fmt.Errorf("cannot get obj by key %q: %w", key, err))
 		return
 	}
 	if !exists {
-		handleNotFound(w, r, d.GVR, key)
+		s.handleNotFound(w, r, d.GVR, key)
 		return
 	}
 	pod := obj.(*corev1.Pod)
@@ -548,11 +572,11 @@ func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 		Type:   corev1.PodScheduled,
 		Status: corev1.ConditionTrue,
 	})
-	klog.V(4).Infof("assigned pod %s to node %s", pod.Name, pod.Spec.NodeName)
+	s.log.V(4).Info("assigned pod to node", "podName", pod.Name, "podNamespace", pod.Namespace, "nodeName", pod.Spec.NodeName)
 	err = store.Update(obj)
 	if err != nil {
 		err = fmt.Errorf("cannot update object %q in store: %w", key, err)
-		handleInternalServerError(w, r, err)
+		s.handleInternalServerError(w, r, err)
 		return
 	}
 	// Return {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
@@ -561,10 +585,10 @@ func (s *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 		Status:   metav1.StatusSuccess,
 		Code:     http.StatusCreated,
 	}
-	writeJsonResponse(w, r, statusOK)
+	writeJsonResponse(s.log, w, r, statusOK)
 }
 
-func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace string, startVersion int64, items []any) (ok bool) {
+func (s *InMemoryKAPI) sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace string, startVersion int64, items []any) (ok bool) {
 	flusher := getFlusher(w)
 	if flusher == nil {
 		return
@@ -572,27 +596,27 @@ func sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace stri
 	for _, item := range items {
 		var obj metav1.Object
 		var rv int64
-		obj, ok = item.(metav1.Object)
-		if !ok {
-			klog.Errorf("failed to cast item.Object to metav1.Object: %v", item)
+		obj, err := meta.Accessor(item)
+		if err != nil {
+			s.log.Error(err, "cannot access object metadata", "item", item)
 			continue
 		}
 		if namespace != "" && obj.GetNamespace() != namespace {
 			continue
 		}
-		rv, err := parseObjectResourceVersion(obj)
+		rv, err = parseObjectResourceVersion(obj)
 		if err != nil {
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		if rv <= startVersion {
 			continue
 		}
 		event := watch.Event{Type: watch.Added, Object: item.(runtime.Object)}
-		eventJson, err := buildWatchEventJson(&event)
+		eventJson, err := buildWatchEventJson(s.log, &event)
 		if err != nil {
 			err = fmt.Errorf("failed to encode watch event for obj %q, ns %q, rv: %d: %w", obj.GetName(), obj.GetNamespace(), rv, err)
-			handleInternalServerError(w, r, err)
+			s.handleInternalServerError(w, r, err)
 			return
 		}
 		_, _ = fmt.Fprintln(w, eventJson)
@@ -625,7 +649,7 @@ func (s *InMemoryKAPI) createWatchChan(d typeinfo.Descriptor, namespace string) 
 	if _, ok := s.watchers[d.GVR]; !ok {
 		s.watchers[d.GVR] = make(map[string]chan watch.Event)
 	}
-	ch := make(chan watch.Event, 100)
+	ch := make(chan watch.Event, s.cfg.WatchQueueSize)
 	s.watchers[d.GVR][namespace] = ch
 	return ch
 }
@@ -640,33 +664,10 @@ func (s *InMemoryKAPI) broadcastEvent(d typeinfo.Descriptor, namespace string, e
 			select {
 			case ch <- event:
 			default:
-				klog.Errorf("cannot broadcast event to namespace %s for event type %s - channel full?", namespace, event.Type)
+				s.log.V(4).Info("cannot broadcast watch event", "namespace", namespace, "event", event)
 			}
 		}
 	}
-}
-
-// generateKubeconfig creates a simple kubeconfig file at /tmp/minkapi.yaml
-func (s *InMemoryKAPI) generateKubeconfig() error {
-	kubeconfig := `apiVersion: v1
-kind: Config
-clusters:
-- cluster:
-    insecure-skip-tls-verify: true
-    server: http://localhost:8080
-  name: minkapi
-contexts:
-- context:
-    cluster: minkapi
-    user: minkapi-user
-    namespace: default
-  name: minkapi-context
-current-context: minkapi-context
-users:
-- name: minkapi-user
-  user: {}
-`
-	return os.WriteFile("/tmp/minkapi.yaml", []byte(kubeconfig), 0644)
 }
 
 func (s *InMemoryKAPI) getStore(gvr schema.GroupVersionResource) cache.Store {
@@ -676,11 +677,11 @@ func (s *InMemoryKAPI) getStore(gvr schema.GroupVersionResource) cache.Store {
 func (s *InMemoryKAPI) getStoreOrWriteError(gvr schema.GroupVersionResource, w http.ResponseWriter, r *http.Request) (store cache.Store) {
 	store = s.getStore(gvr)
 	if store == nil {
-		klog.Errorf("cannot find store for GVR  %q", gvr)
+		slog.Info("no store initialized for GVR", "gvr", gvr)
 		statusErr := apierrors.NewNotFound(gvr.GroupResource(), "STORE")
 		w.WriteHeader(http.StatusNotFound)
 		w.Header().Set("Content-Type", "application/json")
-		writeJsonResponse(w, r, statusErr.ErrStatus)
+		writeJsonResponse(s.log, w, r, statusErr.ErrStatus)
 	}
 	return
 }
@@ -701,7 +702,7 @@ func (s *InMemoryKAPI) currResourceVersion(gvr schema.GroupVersionResource) stri
 
 // createList creates the Kind specific list (PodList, etc.) and returns the same as a runtime.Object.
 // Consider using unstructured.Unstructured here for generic handling or reflection?
-func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
+func createList(log logr.Logger, d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
 	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
 	listType, ok := typesMap[string(d.ListKind)]
 	if !ok {
@@ -732,11 +733,10 @@ func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items [
 	itemType := itemsField.Type().Elem() // e.g., v1.Pod
 	resultSlice := reflect.MakeSlice(itemsField.Type(), 0, len(items))
 
-	var metaV1Obj metav1.Object
 	for _, obj := range items {
-		metaV1Obj, ok = obj.(metav1.Object)
-		if !ok {
-			klog.Warningf("failed to convert %v to metav1.Object", obj)
+		metaV1Obj, err := meta.Accessor(obj)
+		if err != nil {
+			log.Error(err, "cannot access meta object", "obj", obj)
 			continue
 		}
 		if namespace != "" && metaV1Obj.GetNamespace() != namespace {
@@ -756,16 +756,16 @@ func createList(d typeinfo.Descriptor, namespace, currVersionStr string, items [
 	return listObj, nil
 }
 
-func writeStatusError(w http.ResponseWriter, r *http.Request, statusError *apierrors.StatusError) {
+func writeStatusError(log logr.Logger, w http.ResponseWriter, r *http.Request, statusError *apierrors.StatusError) {
 	w.WriteHeader(int(statusError.ErrStatus.Code))
-	writeJsonResponse(w, r, statusError.ErrStatus)
+	writeJsonResponse(log, w, r, statusError.ErrStatus)
 }
 
 // writeJsonResponse sets Content-Type to application/json  and encodes the object to the response writer.
-func writeJsonResponse(w http.ResponseWriter, r *http.Request, obj any) {
+func writeJsonResponse(log logr.Logger, w http.ResponseWriter, r *http.Request, obj any) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(obj); err != nil {
-		klog.Errorf("Failed to encode %s response: %v", r.URL.Path, err)
+		log.Error(err, "cannot  encode response", "method", r.Method, "requestURI", r.RequestURI, "obj", obj)
 		http.Error(w, fmt.Sprintf("Failed to encode response: %v", err), http.StatusInternalServerError)
 	}
 }
@@ -810,7 +810,7 @@ func getFlusher(w http.ResponseWriter) http.Flusher {
 	}
 	return flusher
 }
-func buildWatchEventJson(event *watch.Event) (string, error) {
+func buildWatchEventJson(log logr.Logger, event *watch.Event) (string, error) {
 	// NOTE: Simple Json serialization does NOT work due to bug in Watch struct
 	//if err := json.NewEncoder(w).Encode(event); err != nil {
 	//	http.Error(w, fmt.Sprintf("Failed to encode watch event: %v", err), http.StatusInternalServerError)
@@ -819,23 +819,23 @@ func buildWatchEventJson(event *watch.Event) (string, error) {
 	//}
 	data, err := kjson.Marshal(event.Object)
 	if err != nil {
-		klog.Errorf("Failed to encode watch event: %v", err)
+		log.Error(err, "cannot encode watch event", "event", event)
 		return "", err
 	}
 	payload := fmt.Sprintf("{\"type\":\"%s\",\"object\":%s}", event.Type, string(data))
 	return payload, nil
 }
 
-func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) {
+func (s *InMemoryKAPI) readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
-		handleBadRequest(w, r, err)
+		s.handleBadRequest(w, r, err)
 		ok = false
 		return
 	}
 	if err := json.Unmarshal(data, obj); err != nil {
 		err = fmt.Errorf("cannot unmarshal JSON for request %q: %w", r.RequestURI, err)
-		handleBadRequest(w, r, err)
+		s.handleBadRequest(w, r, err)
 		ok = false
 		return
 	}
@@ -843,30 +843,29 @@ func readBodyIntoObj(w http.ResponseWriter, r *http.Request, obj any) (ok bool) 
 	return
 }
 
-func handleInternalServerError(w http.ResponseWriter, r *http.Request, err error) {
-	klog.Error(err)
-	http.Error(w, "Name or GenerateName is required", http.StatusBadRequest)
+func (s *InMemoryKAPI) handleInternalServerError(w http.ResponseWriter, r *http.Request, err error) {
+	s.log.Error(err, "internal server error", "method", r.Method, "requestURI", r.RequestURI)
 	statusErr := apierrors.NewInternalError(err)
 	w.WriteHeader(http.StatusInternalServerError)
 	w.Header().Set("Content-Type", "application/json")
-	writeJsonResponse(w, r, statusErr.ErrStatus)
+	writeJsonResponse(s.log, w, r, statusErr.ErrStatus)
 }
 
-func handleBadRequest(w http.ResponseWriter, r *http.Request, err error) {
+func (s *InMemoryKAPI) handleNotFound(w http.ResponseWriter, r *http.Request, gr schema.GroupVersionResource, key string) {
+	statusErr := apierrors.NewNotFound(gr.GroupResource(), key)
+	s.log.Error(statusErr, "object not found", "key", key, "resource", gr.Resource)
+	w.WriteHeader(http.StatusNotFound)
+	w.Header().Set("Content-Type", "application/json")
+	writeJsonResponse(s.log, w, r, statusErr.ErrStatus)
+}
+
+func (s *InMemoryKAPI) handleBadRequest(w http.ResponseWriter, r *http.Request, err error) {
 	err = fmt.Errorf("cannot handle request %q: %w", r.Method+" "+r.RequestURI, err)
-	klog.Error(err)
+	s.log.Error(err, "bad request", "method", r.Method, "requestURI", r.RequestURI)
 	statusErr := apierrors.NewBadRequest(err.Error())
 	w.WriteHeader(http.StatusBadRequest)
 	w.Header().Set("Content-Type", "application/json")
-	writeJsonResponse(w, r, statusErr.ErrStatus)
-}
-
-func handleNotFound(w http.ResponseWriter, r *http.Request, gr schema.GroupVersionResource, key string) {
-	klog.Errorf("cannot find object with key %q of resource %q", key, gr.Resource)
-	statusErr := apierrors.NewNotFound(gr.GroupResource(), key)
-	w.WriteHeader(http.StatusNotFound)
-	w.Header().Set("Content-Type", "application/json")
-	writeJsonResponse(w, r, statusErr.ErrStatus)
+	writeJsonResponse(s.log, w, r, statusErr.ErrStatus)
 }
 
 func GetObjectName(r *http.Request, d typeinfo.Descriptor) cache.ObjectName {

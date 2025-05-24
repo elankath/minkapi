@@ -2,39 +2,45 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"github.com/elankath/minkapi/api"
+	"github.com/elankath/minkapi/cli"
 	"github.com/elankath/minkapi/core"
+	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 	"time"
 )
 
 func main() {
-	info, ok := debug.ReadBuildInfo()
-	if ok {
-		if info.Main.Version != "" {
-			fmt.Printf("%s version: %s\n", api.ProgramName, info.Main.Version)
+	cli.PrintVersion()
+	mainOpts, err := cli.ParseProgramFlags(os.Args[1:])
+	if err != nil {
+		if errors.Is(err, pflag.ErrHelp) {
+			return
 		}
-	} else {
-		fmt.Printf("%s: binary build info not embedded", api.ProgramName)
+		_, _ = fmt.Fprintf(os.Stderr, "Err: %v\n", err)
+		os.Exit(cli.ExitErrParseOpts)
 	}
+	// Set up logr with klog backend using NewKlogr
+	log := klog.NewKlogr()
+	//klog.SetLogger(log)
 
 	appCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	service, err := core.NewInMemoryMinKAPI(appCtx)
+	service, err := core.NewInMemoryMinKAPI(appCtx, mainOpts.MinKAPIConfig, log)
 	if err != nil {
-		klog.Error("failed to initialize InMemoryKAPI: %v", err)
+		log.Error(err, "failed to initialize InMemoryKAPI")
 		return
 	}
 	// Start the service in a goroutine
 	go func() {
 		if err := service.Start(); err != nil {
-			klog.Errorf("%s service failed: %v", api.ProgramName, err)
+			log.Error(err, fmt.Sprintf("%s start failed", api.ProgramName), err)
 			os.Exit(1)
 		}
 	}()
@@ -42,7 +48,7 @@ func main() {
 	// Wait for a signal
 	<-appCtx.Done()
 	stop()
-	klog.Warning("Received shutdown signal, initiating graceful shutdown...")
+	log.Info("Received shutdown signal, initiating graceful shutdown")
 
 	// Create a context with a 5-second timeout for shutdown
 	shutDownCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
@@ -50,8 +56,8 @@ func main() {
 
 	// Perform shutdown
 	if err := service.Shutdown(shutDownCtx); err != nil {
-		klog.Errorf("Kubernetes API InMemoryKAPI Shutdown failed: %v", err)
-		os.Exit(1)
+		log.Error(err, fmt.Sprintf(" %s shutdown failed", api.ProgramName))
+		os.Exit(cli.ExitErrShutdown)
 	}
-	klog.Info("Kubernetes API InMemoryKAPI Shutdown gracefully")
+	log.Info(fmt.Sprintf("%s shutdown gracefully.", api.ProgramName))
 }
