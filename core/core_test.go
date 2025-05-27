@@ -66,7 +66,7 @@ func TestPatchEvent(t *testing.T) {
 		return
 	}
 	event := obj.(*eventsv1.Event)
-	err = patchObject(obj.(runtime.Object), "default/a-bingo.aaabbb", []byte(patchEventSeries))
+	err = patchObject(obj.(runtime.Object), "default/a-bingo.aaabbb", "application/strategic-merge-patch+json", []byte(patchEventSeries))
 	if err != nil {
 		t.Errorf("Failed to patch evnt: %v", err)
 		return
