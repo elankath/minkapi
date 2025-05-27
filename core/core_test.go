@@ -6,11 +6,13 @@ import (
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/klog/v2"
 	"os"
 	"testing"
 )
 
 func TestCreateList(t *testing.T) {
+	log := klog.NewKlogr()
 	descriptors := []typeinfo.Descriptor{
 		typeinfo.PodsDescriptor,
 	}
@@ -23,7 +25,7 @@ func TestCreateList(t *testing.T) {
 	for i := 0; i < len(descriptors); i++ {
 		d := descriptors[i]
 		ol := objLists[i]
-		listObj, err := createList(d, "", "v1", ol)
+		listObj, err := createList(log, d, "", "v1", ol)
 		if err != nil {
 			t.Errorf("Failed to create list: %v", err)
 		}

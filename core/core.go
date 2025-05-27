@@ -10,6 +10,7 @@ import (
 	"github.com/elankath/minkapi/core/podutil"
 	"github.com/elankath/minkapi/core/typeinfo"
 	"github.com/go-logr/logr"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"io"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -163,8 +164,9 @@ func (s *InMemoryKAPI) registerResourceRoutes(d typeinfo.Descriptor) {
 
 		s.mux.HandleFunc(fmt.Sprintf("POST /api/v1/%s", r), s.handleCreate(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s", r), s.handleListOrWatch(d))
-		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), s.handleGet(d))
+		s.mux.HandleFunc(fmt.Sprintf("PATCH /api/v1/%s/{name}", r), s.handlePatch(d))
+		s.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), s.handleDelete(d))
 	} else {
 		s.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleCreate(d))
 		s.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), s.handleListOrWatch(d))
@@ -391,7 +393,7 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 			return
 		}
 		contentType := r.Header.Get("Content-Type")
-		if contentType != "application/strategic-merge-patch+json" {
+		if contentType != "application/strategic-merge-patch+json" && contentType != "application/merge-patch+json" {
 			err = fmt.Errorf("unsupported content type %q for obj %q", contentType, key)
 			s.handleInternalServerError(w, r, err)
 			return
@@ -402,7 +404,7 @@ func (s *InMemoryKAPI) handlePatch(d typeinfo.Descriptor) http.HandlerFunc {
 			writeStatusError(s.log, w, r, statusErr)
 			return
 		}
-		err = patchObject(obj.(runtime.Object), key, patchData)
+		err = patchObject(obj.(runtime.Object), key, contentType, patchData)
 		if err != nil {
 			err = fmt.Errorf("failed to atch obj %q: %w", key, err)
 			s.handleInternalServerError(w, r, err)
@@ -892,7 +894,7 @@ func FromAnySlice(objs []any) ([]runtime.Object, error) {
 	return result, nil
 }
 
-func patchObject(objPtr runtime.Object, key string, patchJSON []byte) error {
+func patchObject(objPtr runtime.Object, key string, contentType string, patchBytes []byte) error {
 	objValuePtr := reflect.ValueOf(objPtr)
 	if objValuePtr.Kind() != reflect.Ptr || objValuePtr.IsNil() {
 		return fmt.Errorf("object %q must be a non-nil pointer", key)
@@ -903,11 +905,21 @@ func patchObject(objPtr runtime.Object, key string, patchJSON []byte) error {
 		return fmt.Errorf("failed to marshal object %q: %w", key, err)
 	}
 
-	patchedJSON, err := strategicpatch.StrategicMergePatch(originalJSON, patchJSON, objInterface)
-	if err != nil {
-		return fmt.Errorf("failed to apply strategic merge patch for object %q: %w", key, err)
+	var patchedBytes []byte
+	if contentType == "application/strategic-merge-patch+json" {
+		patchedBytes, err = strategicpatch.StrategicMergePatch(originalJSON, patchBytes, objInterface)
+		if err != nil {
+			return fmt.Errorf("failed to apply strategic merge patch for object %q: %w", key, err)
+		}
+	} else if contentType == "application/merge-patch+json" {
+		patchedBytes, err = jsonpatch.MergePatch(originalJSON, patchBytes)
+		if err != nil {
+			return fmt.Errorf("failed to apply merge-patch for object %q: %w", key, err)
+		}
+	} else {
+		return fmt.Errorf("unsupported patch content type %q for object %q", contentType, key)
 	}
-	err = kjson.Unmarshal(patchedJSON, objInterface)
+	err = kjson.Unmarshal(patchedBytes, objInterface)
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal patched JSON back into obj %q: %w", key, err)
 	}
