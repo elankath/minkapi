@@ -5,6 +5,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/klog/v2"
 	"os"
@@ -25,7 +26,7 @@ func TestCreateList(t *testing.T) {
 	for i := 0; i < len(descriptors); i++ {
 		d := descriptors[i]
 		ol := objLists[i]
-		listObj, err := createList(log, d, "", "v1", ol)
+		listObj, err := createList(log, d, "", "v1", ol, labels.Everything())
 		if err != nil {
 			t.Errorf("Failed to create list: %v", err)
 		}

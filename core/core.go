@@ -16,6 +16,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	kjson "k8s.io/apimachinery/pkg/util/json"
@@ -343,15 +344,22 @@ func (s *InMemoryKAPI) handleListOrWatch(d typeinfo.Descriptor) http.HandlerFunc
 		query := r.URL.Query()
 		isWatch := query.Get("watch")
 		var delegate http.HandlerFunc
+
+		labelSelector, err := parseLabelSelector(r)
+		if err != nil {
+			s.handleBadRequest(w, r, err)
+			return
+		}
+
 		if isWatch == "true" {
-			delegate = s.handleWatch(d)
+			delegate = s.handleWatch(d, labelSelector)
 		} else {
-			delegate = s.handleList(d)
+			delegate = s.handleList(d, labelSelector)
 		}
 		delegate.ServeHTTP(w, r)
 	}
 }
-func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor, labelSelector labels.Selector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
@@ -366,7 +374,7 @@ func (s *InMemoryKAPI) handleList(d typeinfo.Descriptor) http.HandlerFunc {
 			writeStatusError(s.log, w, r, statusErr)
 			return
 		}
-		list, err := createList(s.log, d, namespace, currentVersionStr, objItems)
+		list, err := createList(s.log, d, namespace, currentVersionStr, objItems, labelSelector)
 		if err != nil {
 			statusErr := apierrors.NewInternalError(err)
 			writeStatusError(s.log, w, r, statusErr)
@@ -471,7 +479,7 @@ func (s *InMemoryKAPI) handlePatchStatus(d typeinfo.Descriptor) http.HandlerFunc
 	}
 }
 
-func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
+func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor, labelSelector labels.Selector) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		store := s.getStoreOrWriteError(d.GVR, w, r)
 		if store == nil {
@@ -510,6 +518,9 @@ func (s *InMemoryKAPI) handleWatch(d typeinfo.Descriptor) http.HandlerFunc {
 				metaObj, err := meta.Accessor(event.Object)
 				if err != nil {
 					s.log.Error(err, "could not process event object", "eventObject", event.Object)
+					continue
+				}
+				if !labelSelector.Matches(labels.Set(metaObj.GetLabels())) {
 					continue
 				}
 				rv, _ := strconv.ParseInt(metaObj.GetResourceVersion(), 10, 64)
@@ -704,7 +715,7 @@ func (s *InMemoryKAPI) currResourceVersion(gvr schema.GroupVersionResource) stri
 
 // createList creates the Kind specific list (PodList, etc.) and returns the same as a runtime.Object.
 // Consider using unstructured.Unstructured here for generic handling or reflection?
-func createList(log logr.Logger, d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object) (runtime.Object, error) {
+func createList(log logr.Logger, d typeinfo.Descriptor, namespace, currVersionStr string, items []runtime.Object, labelSelector labels.Selector) (runtime.Object, error) {
 	typesMap := typeinfo.SupportedScheme.KnownTypes(d.GVR.GroupVersion())
 	listType, ok := typesMap[string(d.ListKind)]
 	if !ok {
@@ -742,6 +753,9 @@ func createList(log logr.Logger, d typeinfo.Descriptor, namespace, currVersionSt
 			continue
 		}
 		if namespace != "" && metaV1Obj.GetNamespace() != namespace {
+			continue
+		}
+		if !labelSelector.Matches(labels.Set(metaV1Obj.GetLabels())) {
 			continue
 		}
 		val := reflect.ValueOf(obj)
@@ -963,4 +977,12 @@ func patchStatus(objPtr runtime.Object, key string, patch []byte) error {
 	}
 	statusField.Set(newStatusVal.Elem())
 	return nil
+}
+
+func parseLabelSelector(req *http.Request) (labels.Selector, error) {
+	raw := req.URL.Query().Get("labelSelector")
+	if raw == "" {
+		return labels.Everything(), nil
+	}
+	return labels.Parse(raw)
 }
