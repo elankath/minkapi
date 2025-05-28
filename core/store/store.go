@@ -272,7 +272,7 @@ func (s *InMemResourceStore) Watch(ctx context.Context, startVersion int64, name
 				return err
 			}
 		case <-time.After(s.watchTimeout):
-			s.log.V(4).Info("timed out waiting for watch result", "gvk", s.objGVK, "startVersion", startVersion, "namespace", namespace, "labelSelector", labelSelector.String())
+			s.log.V(4).Info("watcher timed out", "gvk", s.objGVK, "watchTimeout", s.watchTimeout, "startVersion", startVersion, "namespace", namespace, "labelSelector", labelSelector.String())
 			return nil
 		case <-ctx.Done():
 			s.log.V(4).Info("watch context cancelled", "gvk", s.objGVK, "startVersion", startVersion, "namespace", namespace, "labelSelector", labelSelector.String())
