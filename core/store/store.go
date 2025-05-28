@@ -51,6 +51,7 @@ func NewInMemResourceStore(
 		scheme:       scheme,
 		log:          log,
 	}
+	s.log.Info("created in memory resource store", "GVK", objGVK, "resourceName", resourceName, "watchTimeout", watchTimeout)
 	s.rvCounter.Store(1)
 	return &s
 }
@@ -66,7 +67,7 @@ func (s *InMemResourceStore) Add(mo metav1.Object) error {
 	if err != nil {
 		return apierrors.NewInternalError(fmt.Errorf("cannot add object %q to store: %w", key, err))
 	}
-	s.log.Info("added object to store", "key", key, "resourceVersion", mo.GetResourceVersion())
+	s.log.V(4).Info("added object to store", "key", key, "resourceVersion", mo.GetResourceVersion())
 	err = s.broadcaster.Action(watch.Added, o)
 	if err != nil {
 		//TODO: return error here or not ? what should be ideal log level ?
@@ -88,7 +89,7 @@ func (s *InMemResourceStore) Update(mo metav1.Object) error {
 		return apierrors.NewInternalError(fmt.Errorf("cannot update object %q in store: %w", key, err))
 	}
 	s.log.V(4).Info("updated object in store", "key", key, "resourceVersion", mo.GetResourceVersion())
-	err = s.broadcaster.Action(watch.Added, o)
+	err = s.broadcaster.Action(watch.Modified, o)
 	if err != nil {
 		//TODO: return error here or not ? what should be ideal log level ?
 		s.log.Error(err, "failed to broadcast object update", "object", key, mo.GetName())
@@ -271,7 +272,7 @@ func (s *InMemResourceStore) Watch(ctx context.Context, startVersion int64, name
 				return err
 			}
 		case <-time.After(s.watchTimeout):
-			s.log.V(4).Info("timed out waiting for watch result", "gvk", s.objGVK, "startVersion", startVersion, "namespace", namespace, "labelSelector", labelSelector.String())
+			s.log.Info("timed out waiting for watch result", "gvk", s.objGVK, "startVersion", startVersion, "namespace", namespace, "labelSelector", labelSelector.String())
 			return nil
 		case <-ctx.Done():
 			s.log.Info("watch context cancelled", "gvk", s.objGVK, "startVersion", startVersion, "namespace", namespace, "labelSelector", labelSelector.String())

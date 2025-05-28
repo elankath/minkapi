@@ -10,7 +10,7 @@ const (
 	DefaultHost           = "localhost"
 	DefaultPort           = 8008
 	DefaultWatchQueueSize = 100
-	DefaultWatchTimeout   = 30 * time.Second
+	DefaultWatchTimeout   = 5 * time.Minute
 
 	DefaultKubeConfigPath = "/tmp/minkapi.yaml"
 )
