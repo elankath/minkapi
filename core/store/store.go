@@ -67,7 +67,7 @@ func (s *InMemResourceStore) Add(mo metav1.Object) error {
 	if err != nil {
 		return apierrors.NewInternalError(fmt.Errorf("cannot add object %q to store: %w", key, err))
 	}
-	s.log.V(4).Info("added object to store", "key", key, "resourceVersion", mo.GetResourceVersion())
+	s.log.V(4).Info("added object to store", "kind", s.objGVK.Kind, "key", key, "resourceVersion", mo.GetResourceVersion())
 	err = s.broadcaster.Action(watch.Added, o)
 	if err != nil {
 		//TODO: return error here or not ? what should be ideal log level ?
@@ -88,7 +88,7 @@ func (s *InMemResourceStore) Update(mo metav1.Object) error {
 	if err != nil {
 		return apierrors.NewInternalError(fmt.Errorf("cannot update object %q in store: %w", key, err))
 	}
-	s.log.V(4).Info("updated object in store", "key", key, "resourceVersion", mo.GetResourceVersion())
+	s.log.V(4).Info("updated object in store", "kind", s.objGVK.Kind, "key", key, "resourceVersion", mo.GetResourceVersion())
 	err = s.broadcaster.Action(watch.Modified, o)
 	if err != nil {
 		//TODO: return error here or not ? what should be ideal log level ?
@@ -112,7 +112,7 @@ func (s *InMemResourceStore) Delete(key string) error {
 		err = fmt.Errorf("cannot delete object with key %q from store: %w", key, err)
 		return apierrors.NewInternalError(err)
 	}
-	s.log.V(4).Info("deleted object", "key", key)
+	s.log.V(4).Info("deleted object", "kind", s.objGVK.Kind, "key", key)
 	err = s.broadcaster.Action(watch.Deleted, o)
 	if err != nil {
 		//TODO: return error here or not ? what should be ideal log level ?
