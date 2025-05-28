@@ -40,8 +40,12 @@ func main() {
 	// Start the service in a goroutine
 	go func() {
 		if err := service.Start(); err != nil {
-			log.Error(err, fmt.Sprintf("%s start failed", api.ProgramName), err)
-			os.Exit(1)
+			if errors.Is(err, api.ErrStartFailed) {
+				log.Error(err, "failed to start service")
+			} else {
+				log.Error(err, fmt.Sprintf("%s start failed", api.ProgramName), err)
+			}
+			os.Exit(cli.ExitErrStart)
 		}
 	}()
 

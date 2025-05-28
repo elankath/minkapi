@@ -12,5 +12,6 @@ var (
 
 	ErrMissingOpt = errors.New("missing option")
 
-	ErrLoadConfigTemplate = errors.New("cannot load config template")
+	ErrLoadConfigTemplate    = errors.New("cannot load config template")
+	ErrExecuteConfigTemplate = errors.New("cannot execute config template")
 )
