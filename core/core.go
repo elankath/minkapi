@@ -163,6 +163,8 @@ func (k *InMemoryKAPI) registerResourceRoutes(d typeinfo.Descriptor) {
 		k.mux.HandleFunc(fmt.Sprintf("PATCH /api/v1/namespaces/{namespace}/%s/{name}", r), k.handlePatch(d))
 		k.mux.HandleFunc(fmt.Sprintf("PATCH /api/v1/namespaces/{namespace}/%s/{name}/status", r), k.handlePatchStatus(d))
 		k.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/namespaces/{namespace}/%s/{name}", r), k.handleDelete(d))
+		k.mux.HandleFunc(fmt.Sprintf("PUT /api/v1/namespaces/{namespace}/%s/{name}", r), k.handlePut(d))        // Update
+		k.mux.HandleFunc(fmt.Sprintf("PUT /api/v1/namespaces/{namespace}/%s/{name}/status", r), k.handlePut(d)) // UpdateStatus
 
 		if d.Kind == typeinfo.PodsDescriptor.Kind {
 			k.mux.HandleFunc("POST /api/v1/namespaces/{namespace}/pods/{name}/binding", k.handleCreatePodBinding)
@@ -173,12 +175,16 @@ func (k *InMemoryKAPI) registerResourceRoutes(d typeinfo.Descriptor) {
 		k.mux.HandleFunc(fmt.Sprintf("GET /api/v1/%s/{name}", r), k.handleGet(d))
 		k.mux.HandleFunc(fmt.Sprintf("PATCH /api/v1/%s/{name}", r), k.handlePatch(d))
 		k.mux.HandleFunc(fmt.Sprintf("DELETE /api/v1/%s/{name}", r), k.handleDelete(d))
+		k.mux.HandleFunc(fmt.Sprintf("PUT /api/v1/%s/{name}", r), k.handlePut(d))        // Update
+		k.mux.HandleFunc(fmt.Sprintf("PUT /api/v1/%s/{name}/status", r), k.handlePut(d)) // UpdateStatus
+
 	} else {
 		k.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/namespaces/{namespace}/%s", g, r), k.handleCreate(d))
 		k.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s", g, r), k.handleListOrWatch(d))
 		k.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), k.handleGet(d))
 		k.mux.HandleFunc(fmt.Sprintf("PATCH /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), k.handlePatch(d))
 		k.mux.HandleFunc(fmt.Sprintf("DELETE /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), k.handleDelete(d))
+		k.mux.HandleFunc(fmt.Sprintf("PUT /apis/%s/v1/namespaces/{namespace}/%s/{name}", g, r), k.handlePut(d))
 
 		k.mux.HandleFunc(fmt.Sprintf("POST /apis/%s/v1/%s", g, r), k.handleCreate(d))
 		k.mux.HandleFunc(fmt.Sprintf("GET /apis/%s/v1/%s", g, r), k.handleListOrWatch(d))
@@ -269,6 +275,33 @@ func (k *InMemoryKAPI) handleCreate(d typeinfo.Descriptor) http.HandlerFunc {
 			return
 		}
 		writeJsonResponse(k.log, w, r, mo)
+	}
+}
+
+// handlePut Ref: https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#considerations-for-put-operations (TODO ensure handlePut follows this)
+// TODO: handlePut is not complete
+func (k *InMemoryKAPI) handlePut(d typeinfo.Descriptor) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		s := k.getStoreOrWriteError(d.GVK, w, r)
+		if s == nil {
+			return
+		}
+		key := GetObjectKey(r, d)
+		obj, err := s.GetByKey(key)
+		if err != nil {
+			k.handleError(w, r, err)
+			return
+		}
+		if !k.readBodyIntoObj(w, r, obj) {
+			return
+		}
+		metaObj := obj.(metav1.Object)
+		err = s.Update(metaObj)
+		if err != nil {
+			k.handleError(w, r, err)
+			return
+		}
+		writeJsonResponse(k.log, w, r, obj)
 	}
 }
 
