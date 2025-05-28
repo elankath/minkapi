@@ -163,7 +163,7 @@ func (s *InMemResourceStore) List(namespace string, labelSelector labels.Selecto
 	}
 	typeMetaVal.Set(reflect.ValueOf(metav1.TypeMeta{
 		Kind:       s.objListGVK.Kind,
-		APIVersion: s.objGVK.String(),
+		APIVersion: s.objGVK.GroupVersion().String(),
 	}))
 	listMetaVal.Set(reflect.ValueOf(metav1.ListMeta{
 		ResourceVersion: currVersionStr,

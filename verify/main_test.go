@@ -3,6 +3,7 @@ package verify
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"github.com/elankath/minkapi/core/typeinfo"
 	corev1 "k8s.io/api/core/v1"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 	"os"
 	"testing"
 	"time"
@@ -259,11 +261,17 @@ func getKubeConfigPath() string {
 	return kubeConfigPath
 }
 func TestSharedInformerPod(t *testing.T) {
+	flagSet := flag.NewFlagSet("klog", flag.ContinueOnError)
+	klog.InitFlags(flagSet)
+	err := flagSet.Parse([]string{"-v=4"})
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := createKubeClient(t)
 	t.Logf("Created kubernetes client")
 	factory := informers.NewSharedInformerFactory(client, 30*time.Second)
 	podInformer := factory.Core().V1().Pods().Informer()
-	_, err := podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+	_, err = podInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj interface{}) {
 			p := obj.(*corev1.Pod)
 			t.Logf("[ADD] Pod: %s\n", p.Name)

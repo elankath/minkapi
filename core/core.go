@@ -543,43 +543,6 @@ func (k *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 	writeJsonResponse(k.log, w, r, statusOK)
 }
 
-func (k *InMemoryKAPI) sendPendingAddEvents(w http.ResponseWriter, r *http.Request, namespace string, startVersion int64, items []any) (ok bool) {
-	flusher := getFlusher(w)
-	if flusher == nil {
-		return
-	}
-	for _, item := range items {
-		var obj metav1.Object
-		var rv int64
-		obj, err := meta.Accessor(item)
-		if err != nil {
-			k.log.Error(err, "cannot access object metadata", "item", item)
-			continue
-		}
-		if namespace != "" && obj.GetNamespace() != namespace {
-			continue
-		}
-		rv, err = parseObjectResourceVersion(obj)
-		if err != nil {
-			k.handleInternalServerError(w, r, err)
-			return
-		}
-		if rv <= startVersion {
-			continue
-		}
-		event := watch.Event{Type: watch.Added, Object: item.(runtime.Object)}
-		eventJson, err := buildWatchEventJson(k.log, &event)
-		if err != nil {
-			err = fmt.Errorf("failed to encode watch event for obj %q, ns %q, rv: %d: %w", obj.GetName(), obj.GetNamespace(), rv, err)
-			k.handleInternalServerError(w, r, err)
-			return
-		}
-		_, _ = fmt.Fprintln(w, eventJson)
-		flusher.Flush()
-	}
-	ok = true
-	return
-}
 func (k *InMemoryKAPI) getStore(gvk schema.GroupVersionKind) *store.InMemResourceStore {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
@@ -622,13 +585,6 @@ func getParseResourceVersion(log logr.Logger, w http.ResponseWriter, r *http.Req
 		return
 	}
 	ok = true
-	return
-}
-func parseObjectResourceVersion(obj metav1.Object) (resourceVersion int64, err error) {
-	resourceVersion, err = parseResourceVersion(obj.GetResourceVersion())
-	if err != nil {
-		err = fmt.Errorf("failed to parse resource version %q for object %q in ns %q: %w", obj.GetResourceVersion(), obj.GetName(), obj.GetNamespace(), err)
-	}
 	return
 }
 func parseResourceVersion(rvStr string) (resourceVersion int64, err error) {

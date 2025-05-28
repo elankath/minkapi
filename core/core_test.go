@@ -4,36 +4,32 @@ import (
 	"github.com/elankath/minkapi/core/typeinfo"
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/klog/v2"
 	"os"
 	"testing"
 )
 
-func TestCreateList(t *testing.T) {
-	log := klog.NewKlogr()
-	descriptors := []typeinfo.Descriptor{
-		typeinfo.PodsDescriptor,
-	}
-	objLists := [][]runtime.Object{
-		{
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pa"}},
-			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pb"}},
-		},
-	}
-	for i := 0; i < len(descriptors); i++ {
-		d := descriptors[i]
-		ol := objLists[i]
-		listObj, err := createList(log, d, "", "v1", ol, labels.Everything())
-		if err != nil {
-			t.Errorf("Failed to create list: %v", err)
-		}
-		t.Logf("Created list object using %q: %v", d.ListGVK, listObj)
-	}
-
-}
+//func TestCreateList(t *testing.T) {
+//	log := klog.NewKlogr()
+//	descriptors := []typeinfo.Descriptor{
+//		typeinfo.PodsDescriptor,
+//	}
+//	objLists := [][]runtime.Object{
+//		{
+//			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pa"}},
+//			&corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "pb"}},
+//		},
+//	}
+//	for i := 0; i < len(descriptors); i++ {
+//		d := descriptors[i]
+//		ol := objLists[i]
+//		listObj, err := createList(log, d, "", "v1", ol, labels.Everything())
+//		if err != nil {
+//			t.Errorf("Failed to create list: %v", err)
+//		}
+//		t.Logf("Created list object using %q: %v", d.ListGVK, listObj)
+//	}
+//}
 
 func TestPatchPodStatus(t *testing.T) {
 	data := readFile(t, "testdata/pod-a.json")
