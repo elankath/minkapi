@@ -25,7 +25,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
-	"log/slog"
 	"net"
 	"net/http"
 	"reflect"
@@ -552,8 +551,9 @@ func (k *InMemoryKAPI) getStore(gvk schema.GroupVersionKind) *store.InMemResourc
 func (k *InMemoryKAPI) getStoreOrWriteError(gvk schema.GroupVersionKind, w http.ResponseWriter, r *http.Request) (s *store.InMemResourceStore) {
 	s = k.getStore(gvk)
 	if s == nil {
-		slog.Info("no store initialized for GVK", "gvk", gvk)
-		k.handleInternalServerError(w, r, fmt.Errorf("no store initialized for GVK %q", gvk))
+		err := fmt.Errorf("no store initialized for GVK %q", gvk)
+		k.log.Error(err, "store error", "gvk", gvk)
+		k.handleInternalServerError(w, r, err)
 	}
 	return
 }
