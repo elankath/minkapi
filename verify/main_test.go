@@ -2,21 +2,32 @@
 package verify
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"flag"
 	"fmt"
 	"github.com/elankath/minkapi/core/typeinfo"
+	"io"
+	"io/fs"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+	"log/slog"
 	"os"
+	"path/filepath"
+	"runtime"
+	"sigs.k8s.io/yaml"
+	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -82,7 +93,7 @@ func TestSharedInformerNode(t *testing.T) {
 
 	// Wait for initial cache sync
 	if !cache.WaitForCacheSync(stopCh, nodeInformer.HasSynced) {
-		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		t.Error(fmt.Errorf("timed out waiting for caches to sync"))
 		return
 	}
 
@@ -120,7 +131,7 @@ func TestSharedInformerStorageClass(t *testing.T) {
 
 	// Wait for initial cache sync
 	if !cache.WaitForCacheSync(stopCh, storageInformer.HasSynced) {
-		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		t.Error(fmt.Errorf("timed out waiting for caches to sync"))
 		return
 	}
 
@@ -296,11 +307,243 @@ func TestSharedInformerPod(t *testing.T) {
 
 	// Wait for initial cache sync
 	if !cache.WaitForCacheSync(stopCh, podInformer.HasSynced) {
-		runtime.HandleError(fmt.Errorf("timed out waiting for caches to sync"))
+		t.Error(fmt.Errorf("timed out waiting for caches to sync"))
 		return
 	}
 
 	t.Logf("PodInformer informer running...")
 	<-stopCh
 
+}
+
+func TestLoadClusterObjects(t *testing.T) {
+	objects, err := loadObjects(t, "/tmp/prod-hna0")
+	if err != nil {
+		t.Errorf("failed to load objects: %v", err)
+		return
+	}
+	t.Logf("Loaded %d objects", len(objects))
+	runtime.GC()
+	rss, err := getRSS()
+	if err != nil {
+		t.Errorf("failed to get RSS: %v", err)
+		return
+	}
+	t.Logf("RSS in Bytes: %d", rss)
+	t.Logf("RSS in Human: %s", bytesToHuman(rss))
+}
+
+func TestLoadClusterJsons(t *testing.T) {
+	objJsons, err := loadObjectJSONs(t, "/tmp/prod-hna0")
+	if err != nil {
+		t.Errorf("failed to load objects: %v", err)
+		return
+	}
+	t.Logf("Loaded %d objects", len(objJsons))
+	runtime.GC()
+	// Convert HeapAlloc to a Quantity
+	// Print human-readable format
+	rss, err := getRSS()
+	if err != nil {
+		t.Errorf("failed to get RSS: %v", err)
+		return
+	}
+	t.Logf("RSS in Bytes: %d", rss)
+	t.Logf("RSS in Human: %s", bytesToHuman(rss))
+}
+
+func loadObjects(t *testing.T, baseObjDir string) (objs []*unstructured.Unstructured, err error) {
+	t.Helper()
+	start := time.Now()
+	t.Logf("Loading objects from baseObjDir %q", baseObjDir)
+	objCount := 0
+	objs = make([]*unstructured.Unstructured, 0, 3000)
+	err = filepath.WalkDir(baseObjDir, func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf(" path error for %q: %w", path, err)
+		}
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			return nil
+		}
+		// Infer GVR from parent directory
+		resourcesDirName := filepath.Base(filepath.Dir(path))
+		parts := strings.SplitN(resourcesDirName, "-", 3)
+		if len(parts) != 3 {
+			err = fmt.Errorf("invalid object resourcesDirName: %s", resourcesDirName)
+			return err
+		}
+		var obj *unstructured.Unstructured
+		obj, err = loadAndCleanObj(path)
+		if err != nil {
+			return err
+		}
+		objs = append(objs, obj)
+		objCount++
+		if objCount%2000 == 0 {
+			slog.Info("Loaded object", "objCount", objCount, "path", path)
+		} else {
+			slog.Debug("Loaded object", "objCount", objCount, "path", path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	end := time.Now()
+	t.Logf("Loaded total objects: %d from baseObjDir %q in %s duration", objCount, baseObjDir, end.Sub(start))
+	return objs, nil
+}
+
+func loadObjectJSONs(t *testing.T, baseObjDir string) (objJsons [][]byte, err error) {
+	t.Helper()
+	t.Logf("Loading objects from baseObjDir %q", baseObjDir)
+	start := time.Now()
+	objCount := 0
+	objJsons = make([][]byte, 0, 10000)
+	var totalSize uint64 = 0
+	err = filepath.WalkDir(baseObjDir, func(path string, e fs.DirEntry, err error) error {
+		if err != nil {
+			return fmt.Errorf(" path error for %q: %w", path, err)
+		}
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			return nil
+		}
+		// Infer GVR from parent directory
+		resourcesDirName := filepath.Base(filepath.Dir(path))
+		parts := strings.SplitN(resourcesDirName, "-", 3)
+		if len(parts) != 3 {
+			err = fmt.Errorf("invalid object resourcesDirName: %s", resourcesDirName)
+			return err
+		}
+		data, err := loadObjBytes(path)
+		if err != nil {
+			return err
+		}
+		objJsons = append(objJsons, data)
+		objCount++
+		if objCount%2000 == 0 {
+			t.Logf("#%d Loaded object of size %d from path %q", objCount, len(data), path)
+		}
+		totalSize += uint64(len(data))
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	end := time.Now()
+	t.Logf("Loaded total objects: %d, totalSize: %d, humanSize: %s from baseObjDir %q in %s duration", objCount, totalSize, bytesToHuman(totalSize), baseObjDir, end.Sub(start))
+	return objJsons, nil
+}
+
+func loadAndCleanObj(objPath string) (obj *unstructured.Unstructured, err error) {
+	data, err := os.ReadFile(objPath)
+	if err != nil {
+		err = fmt.Errorf("failed to read %q: %w", objPath, err)
+		return
+	}
+	obj = &unstructured.Unstructured{}
+	jsonData, err := yaml.YAMLToJSON(data)
+	if err != nil {
+		err = fmt.Errorf("failed to convert YAML to JSON for %q: %w", objPath, err)
+		return
+	}
+
+	err = obj.UnmarshalJSON(jsonData)
+	if err != nil {
+		err = fmt.Errorf("failed to unmarshal object in %q: %w", objPath, err)
+		return
+	}
+	unstructured.RemoveNestedField(obj.Object, "metadata", "resourceVersion")
+	//unstructured.RemoveNestedField(obj.Object, "metadata", "uid")
+	//unstructured.RemoveNestedField(obj.Object, "metadata", "generation")
+	obj.SetManagedFields(nil)
+	//unstructured.RemoveNestedField(obj.Object, "status")
+	obj.SetGeneration(0)
+
+	if obj.GetKind() != "Pod" {
+		return
+	}
+	//TODO: Make this configurable via flag
+
+	err = unstructured.SetNestedField(obj.Object, "", "spec", "nodeName")
+	if err != nil {
+		err = fmt.Errorf("cannot clear spec.nodeName for pod %q: %w", obj.GetName(), err)
+		return
+	}
+	return
+}
+
+func loadObjBytes(objPath string) (compressData []byte, err error) {
+	data, err := os.ReadFile(objPath)
+	if err != nil {
+		err = fmt.Errorf("failed to read %q: %w", objPath, err)
+		return
+	}
+	jsonData, err := yaml.YAMLToJSON(data)
+	if err != nil {
+		err = fmt.Errorf("failed to convert YAML to JSON for %q: %w", objPath, err)
+		return
+	}
+	compressData, err = compressJSON(jsonData)
+	return
+}
+
+// bytesToHuman converts a uint64 byte value to a human-readable string with BinarySI units (B, Ki, Mi, Gi, etc.).
+func bytesToHuman(bytes uint64) string {
+	const (
+		KiB = 1024
+		MiB = 1024 * KiB
+		GiB = 1024 * MiB
+		TiB = 1024 * GiB
+		PiB = 1024 * TiB
+		EiB = 1024 * PiB
+	)
+	switch {
+	case bytes >= EiB:
+		return fmt.Sprintf("%.2fEi", float64(bytes)/float64(EiB))
+	case bytes >= PiB:
+		return fmt.Sprintf("%.2fPi", float64(bytes)/float64(PiB))
+	case bytes >= TiB:
+		return fmt.Sprintf("%.2fTi", float64(bytes)/float64(TiB))
+	case bytes >= GiB:
+		return fmt.Sprintf("%.2fGi", float64(bytes)/float64(GiB))
+	case bytes >= MiB:
+		return fmt.Sprintf("%.2fMi", float64(bytes)/float64(MiB))
+	case bytes >= KiB:
+		return fmt.Sprintf("%.2fKi", float64(bytes)/float64(KiB))
+	default:
+		return fmt.Sprintf("%dB", bytes)
+	}
+}
+
+// getRSS attempts to get the maximum RSS (Resident Set Size) in bytes for the current process using syscall.Getrusage.
+func getRSS() (uint64, error) {
+	var rusage syscall.Rusage
+	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &rusage); err != nil {
+		return 0, fmt.Errorf("failed to get rusage: %w", err)
+	}
+	// ru_maxrss is the maximum resident set size in bytes
+	return uint64(rusage.Maxrss), nil
+}
+
+var bufPool = sync.Pool{
+	New: func() interface{} { return new(bytes.Buffer) },
+}
+
+func compressJSON(data []byte) ([]byte, error) {
+	buf := bufPool.Get().(*bytes.Buffer)
+	defer bufPool.Put(buf)
+	buf.Reset()
+	gz := gzip.NewWriter(buf)
+	_, err := io.Copy(gz, bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to compress data: %w", err)
+	}
+	if err := gz.Close(); err != nil {
+		return nil, err
+	}
+	// Return a copy of the buffer's contents to avoid reuse issues
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result, nil
 }
