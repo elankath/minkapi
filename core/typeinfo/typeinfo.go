@@ -165,7 +165,7 @@ var (
 		ServerAddressByClientCIDRs: []metav1.ServerAddressByClientCIDR{
 			{
 				ClientCIDR:    "0.0.0.0/0",
-				ServerAddress: "127.0.0.1:8080",
+				ServerAddress: "127.0.0.1:8008",
 			},
 		},
 	}

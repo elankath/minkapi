@@ -31,6 +31,9 @@ type MinKAPIConfig struct {
 
 	// WatchQueueSize is the maximum number of events to queue per watcher
 	WatchQueueSize int
+
+	// ProfilingEnable indicates whether the minkapi service should register the standard pprof HTTP handlers: /debug/pprof/*
+	ProfilingEnabled bool
 }
 type MinKAPIAccess interface {
 	// LoadObjecs([]metav1.Object|runtime.Object)

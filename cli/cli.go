@@ -43,6 +43,7 @@ func SetupFlagsToOpts() (*pflag.FlagSet, *MainOpts) {
 	flagSet.IntVarP(&mainOpts.Port, "port", "P", api.DefaultPort, "listen port for REST API")
 	flagSet.IntVarP(&mainOpts.WatchQueueSize, "watch-queue-size", "s", api.DefaultWatchQueueSize, "max number of events to queue per watcher")
 	flagSet.DurationVarP(&mainOpts.WatchTimeout, "watch-timeout", "t", api.DefaultWatchTimeout, "watch timeout after which connection is closed and watch removed")
+	flagSet.BoolVarP(&mainOpts.ProfilingEnabled, "pprof", "p", false, "enable pprof profiling")
 
 	klogFlagSet := flag.NewFlagSet("klog", flag.ContinueOnError)
 	klog.InitFlags(klogFlagSet)

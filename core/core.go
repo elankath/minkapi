@@ -27,7 +27,9 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"reflect"
+	rt "runtime"
 	"strconv"
 	"sync"
 	"text/template"
@@ -129,6 +131,20 @@ func (k *InMemoryKAPI) closeStores() {
 }
 
 func (k *InMemoryKAPI) registerRoutes() {
+	if k.cfg.ProfilingEnabled {
+		k.log.Info("profiling enabled - registering /debug/pprof/* handlers")
+		k.mux.HandleFunc("/debug/pprof/", pprof.Index)
+		k.mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		k.mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		k.mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		k.mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+		k.mux.HandleFunc("/trigger-gc", func(w http.ResponseWriter, r *http.Request) {
+			_, _ = fmt.Fprintln(w, "GC Triggering")
+			rt.GC() // force garbage collection
+			_, _ = fmt.Fprintln(w, "GC Triggered")
+		})
+	}
+
 	k.mux.HandleFunc("GET /api", k.handleAPIVersions)
 	k.mux.HandleFunc("GET /apis", k.handleAPIGroups)
 
