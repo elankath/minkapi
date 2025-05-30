@@ -68,12 +68,13 @@ func (s *InMemResourceStore) Add(mo metav1.Object) error {
 		return apierrors.NewInternalError(fmt.Errorf("cannot add object %q to store: %w", key, err))
 	}
 	s.log.V(4).Info("added object to store", "kind", s.objGVK.Kind, "key", key, "resourceVersion", mo.GetResourceVersion())
-	err = s.broadcaster.Action(watch.Added, o)
-	if err != nil {
-		//TODO: return error here or not ? what should be ideal log level ?
-		s.log.Error(err, "failed to broadcast object add", "key", key, mo.GetName())
-		//return fmt.Errorf("cannot broadcast added object %q: %w", cache.NewObjectName(mo.GetNamespace(), mo.GetName()), err)
-	}
+
+	go func() {
+		err = s.broadcaster.Action(watch.Added, o)
+		if err != nil {
+			s.log.Error(err, "failed to broadcast object add", "key", key, mo.GetName())
+		}
+	}()
 	return nil
 }
 
@@ -89,12 +90,12 @@ func (s *InMemResourceStore) Update(mo metav1.Object) error {
 		return apierrors.NewInternalError(fmt.Errorf("cannot update object %q in store: %w", key, err))
 	}
 	s.log.V(4).Info("updated object in store", "kind", s.objGVK.Kind, "key", key, "resourceVersion", mo.GetResourceVersion())
-	err = s.broadcaster.Action(watch.Modified, o)
-	if err != nil {
-		//TODO: return error here or not ? what should be ideal log level ?
-		s.log.Error(err, "failed to broadcast object update", "object", key, mo.GetName())
-		//return fmt.Errorf("cannot broadcast updated object %q: %w", cache.NewObjectName(mo.GetNamespace(), mo.GetName()), err)
-	}
+	go func() {
+		err = s.broadcaster.Action(watch.Modified, o)
+		if err != nil {
+			s.log.Error(err, "failed to broadcast object update", "object", key, mo.GetName())
+		}
+	}()
 	return nil
 }
 
@@ -113,12 +114,12 @@ func (s *InMemResourceStore) Delete(key string) error {
 		return apierrors.NewInternalError(err)
 	}
 	s.log.V(4).Info("deleted object", "kind", s.objGVK.Kind, "key", key)
-	err = s.broadcaster.Action(watch.Deleted, o)
-	if err != nil {
-		//TODO: return error here or not ? what should be ideal log level ?
-		s.log.Error(err, "failed to broadcast object update", "key", key, "resourceVersion", mo.GetResourceVersion())
-		//return fmt.Errorf("cannot broadcast object delete %q: %w", cache.NewObjectName(mo.GetNamespace(), mo.GetName()), err)
-	}
+	go func() {
+		err = s.broadcaster.Action(watch.Deleted, o)
+		if err != nil {
+			s.log.Error(err, "failed to broadcast object delete", "key", key, "resourceVersion", mo.GetResourceVersion())
+		}
+	}()
 	return nil
 }
 
