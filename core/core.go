@@ -14,6 +14,7 @@ import (
 	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"io"
 	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -25,12 +26,14 @@ import (
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/set"
 	"net"
 	"net/http"
 	"net/http/pprof"
 	"reflect"
 	rt "runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"text/template"
 	"time"
@@ -49,6 +52,111 @@ type InMemoryKAPI struct {
 	kubeConfigTmpl *template.Template
 	server         *http.Server
 	log            logr.Logger
+}
+
+func (k *InMemoryKAPI) CreateObject(gvk schema.GroupVersionKind, obj metav1.Object) (err error) {
+	s := k.getStore(gvk)
+	if s == nil {
+		return fmt.Errorf("%w: no store for GVK %q", api.ErrStoreNotFound, gvk)
+	}
+
+	name := obj.GetName()
+	namePrefix := obj.GetGenerateName()
+	if name == "" {
+		if namePrefix == "" {
+			return fmt.Errorf("%w: missing both name and generateName in request for creating object of objGvk %q in %q namespace", api.ErrCreateObject, gvk, obj.GetNamespace())
+		}
+		name = typeinfo.GenerateName(namePrefix)
+	}
+	obj.SetName(name)
+
+	createTimestamp := obj.GetCreationTimestamp()
+	if (&createTimestamp).IsZero() { // only set creationTimestamp if not already set.
+		obj.SetCreationTimestamp(metav1.Time{Time: time.Now()})
+	}
+
+	if obj.GetUID() == "" {
+		obj.SetUID(uuid.NewUUID())
+	}
+
+	err = s.Add(obj)
+	if err != nil {
+		return fmt.Errorf("%w: %w", api.ErrCreateObject, err)
+	}
+
+	return nil
+}
+
+func (k *InMemoryKAPI) DeleteObjects(gvk schema.GroupVersionKind, namespace string, names set.Set[string]) error {
+	s := k.getStore(gvk)
+	if s == nil {
+		return fmt.Errorf("%w: store not found for gvk %q", api.ErrDeleteObject, gvk)
+	}
+	c := store.MatchCriteria{
+		Namespace: namespace,
+		Names:     names,
+	}
+	return s.DeleteObjects(c)
+}
+
+func (k *InMemoryKAPI) ListPods(namespace string, matchingPodNames ...string) ([]*corev1.Pod, error) {
+	if len(strings.TrimSpace(namespace)) == 0 {
+		return nil, errors.New("cannot list pods without namespace")
+	}
+	podNamesSet := set.New(matchingPodNames...)
+	c := store.MatchCriteria{
+		Namespace: namespace,
+		Names:     podNamesSet,
+	}
+	gvk := typeinfo.PodsDescriptor.GVK
+	s := k.getStore(gvk)
+	if s == nil {
+		return nil, fmt.Errorf("%w: store not found for gvk %q", api.ErrListObjects, gvk)
+	}
+	objs, err := s.ListMetaObjects(c)
+	if err != nil {
+		return nil, err
+	}
+	pods := make([]*corev1.Pod, 0, len(objs))
+	for _, obj := range objs {
+		pods = append(pods, obj.(*corev1.Pod))
+	}
+	return pods, nil
+}
+
+func (k *InMemoryKAPI) DeleteObjectsMatchingLabels(gvk schema.GroupVersionKind, namespace string, labels map[string]string) error {
+	s := k.getStore(gvk)
+	if s == nil {
+		return fmt.Errorf("%w: store not found for gvk %q", api.ErrDeleteObject, gvk)
+	}
+	c := store.MatchCriteria{
+		Namespace: namespace,
+		Labels:    labels,
+	}
+	return s.DeleteObjects(c)
+}
+
+func (k *InMemoryKAPI) ListEvents(namespace string) ([]*eventsv1.Event, error) {
+	if len(strings.TrimSpace(namespace)) == 0 {
+		return nil, errors.New("cannot list events without namespace")
+	}
+	c := store.MatchCriteria{
+		Namespace: namespace,
+	}
+	gvk := typeinfo.EventsDescriptor.GVK
+	s := k.getStore(gvk)
+	if s == nil {
+		return nil, fmt.Errorf("%w: store not found for gvk %q", api.ErrListObjects, gvk)
+	}
+	objs, err := s.ListMetaObjects(c)
+	if err != nil {
+		return nil, err
+	}
+	events := make([]*eventsv1.Event, 0, len(objs))
+	for _, obj := range objs {
+		events = append(events, obj.(*eventsv1.Event))
+	}
+	return events, nil
 }
 
 func NewInMemoryMinKAPI(appCtx context.Context, cfg api.MinKAPIConfig, log logr.Logger) (*InMemoryKAPI, error) {
@@ -360,7 +468,6 @@ func (k *InMemoryKAPI) handleDelete(d typeinfo.Descriptor) http.HandlerFunc {
 			k.handleError(w, r, fmt.Errorf("stored object with key %q is not metav1.Object: %w", objKey, err))
 			return
 		}
-		mo.SetDeletionTimestamp(&metav1.Time{Time: time.Time{}})
 		status := metav1.Status{
 			TypeMeta: metav1.TypeMeta{ //No idea why this is explicitly needed just for this payload, but kubectl complains
 				Kind:       "Status",

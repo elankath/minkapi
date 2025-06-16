@@ -1,6 +1,14 @@
 package api
 
-import "time"
+import (
+	"k8s.io/utils/set"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+)
 
 var (
 	ProgramName = "minkapi"
@@ -36,5 +44,9 @@ type MinKAPIConfig struct {
 	ProfilingEnabled bool
 }
 type MinKAPIAccess interface {
-	// LoadObjecs([]metav1.Object|runtime.Object)
+	CreateObject(gvk schema.GroupVersionKind, obj metav1.Object) error
+	DeleteObjects(gvk schema.GroupVersionKind, namespace string, names set.Set[string]) error
+	ListPods(namespace string, matchingPodNames ...string) ([]*corev1.Pod, error)
+	DeleteObjectsMatchingLabels(gvk schema.GroupVersionKind, namespace string, labels map[string]string) error
+	ListEvents(namespace string) ([]*eventsv1.Event, error)
 }

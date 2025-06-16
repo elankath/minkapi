@@ -2,6 +2,7 @@ package store
 
 import (
 	"fmt"
+	"github.com/elankath/minkapi/api"
 	"github.com/elankath/minkapi/core/typeinfo"
 	"github.com/go-logr/logr"
 	"golang.org/x/net/context"
@@ -13,6 +14,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/utils/set"
 	"reflect"
 	"strconv"
 	"sync/atomic"
@@ -113,6 +115,7 @@ func (s *InMemResourceStore) Delete(key string) error {
 		err = fmt.Errorf("cannot delete object with key %q from store: %w", key, err)
 		return apierrors.NewInternalError(err)
 	}
+	mo.SetDeletionTimestamp(&metav1.Time{Time: time.Time{}})
 	s.log.V(4).Info("deleted object", "kind", s.objGVK.Kind, "key", key)
 	go func() {
 		err = s.broadcaster.Action(watch.Deleted, o)
@@ -205,6 +208,72 @@ func (s *InMemResourceStore) List(namespace string, labelSelector labels.Selecto
 	itemsField.Set(resultSlice)
 	listObj = ptr.Interface().(runtime.Object)
 	return listObj, nil
+}
+
+type MatchCriteria struct {
+	Namespace string
+	Names     set.Set[string]
+	Labels    map[string]string
+}
+
+func (c MatchCriteria) Matches(obj metav1.Object) bool {
+	if c.Namespace != "" && obj.GetNamespace() != c.Namespace {
+		return false
+	}
+	if c.Names != nil && c.Names.Len() > 0 && !c.Names.Has(obj.GetName()) {
+		return false
+	}
+	if c.Labels != nil && len(c.Labels) > 0 && !IsSubset(c.Labels, obj.GetLabels()) {
+		return false
+	}
+	return true
+}
+
+func (s *InMemResourceStore) ListMetaObjects(c MatchCriteria) ([]metav1.Object, error) {
+	items := s.delegate.List()
+	objects := make([]metav1.Object, 0, 100)
+	for _, item := range items {
+		mo, err := AsMeta(s.log, item)
+		if err != nil {
+			err := fmt.Errorf("%w: %w", api.ErrListObjects, err)
+			return nil, err
+		}
+		if c.Matches(mo) {
+			objects = append(objects, mo)
+		}
+	}
+	return objects, nil
+}
+
+func IsSubset(subset, superset map[string]string) bool {
+	for k, v := range subset {
+		if val, ok := superset[k]; !ok || val != v {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *InMemResourceStore) DeleteObjects(c MatchCriteria) error {
+	items := s.delegate.List()
+	for _, item := range items {
+		mo, err := AsMeta(s.log, item)
+		if err != nil {
+			return fmt.Errorf("%w: %w", api.ErrDeleteObject, err)
+		}
+		if !c.Matches(mo) {
+			continue
+		}
+		objKey := cache.NewObjectName(mo.GetNamespace(), mo.GetName()).String()
+		if err := s.Delete(objKey); err != nil {
+			if !apierrors.IsNotFound(err) {
+				return fmt.Errorf("%w: %w", api.ErrDeleteObject, err)
+			} else {
+				s.log.Info("object to delete not found in store", "key", objKey)
+			}
+		}
+	}
+	return nil
 }
 
 func (s *InMemResourceStore) validateRuntimeObj(mo metav1.Object) (o runtime.Object, err error) {
@@ -353,11 +422,11 @@ func parseResourceVersion(rvStr string) (resourceVersion int64, err error) {
 	}
 	return
 }
-func AsMeta(log logr.Logger, o runtime.Object) (mo metav1.Object, err error) {
+func AsMeta(log logr.Logger, o any) (mo metav1.Object, err error) {
 	mo, err = meta.Accessor(o)
 	if err != nil {
 		log.Error(err, "cannot access meta object", "object", o)
-		err = apierrors.NewInternalError(fmt.Errorf("cannot access meta object for o of kind %q, type %T", o.GetObjectKind(), o))
+		err = apierrors.NewInternalError(fmt.Errorf("cannot access meta object for o of type %T", o))
 	}
 	return
 }
