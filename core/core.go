@@ -5,28 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/elankath/minkapi/api"
-	"github.com/elankath/minkapi/core/configtmpl"
-	"github.com/elankath/minkapi/core/podutil"
-	"github.com/elankath/minkapi/core/store"
-	"github.com/elankath/minkapi/core/typeinfo"
-	"github.com/go-logr/logr"
-	jsonpatch "gopkg.in/evanphx/json-patch.v4"
 	"io"
-	corev1 "k8s.io/api/core/v1"
-	eventsv1 "k8s.io/api/events/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	kjson "k8s.io/apimachinery/pkg/util/json"
-	"k8s.io/apimachinery/pkg/util/strategicpatch"
-	"k8s.io/apimachinery/pkg/util/uuid"
-	"k8s.io/apimachinery/pkg/watch"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/set"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -37,6 +16,28 @@ import (
 	"sync"
 	"text/template"
 	"time"
+
+	"github.com/elankath/minkapi/api"
+	"github.com/elankath/minkapi/core/configtmpl"
+	"github.com/elankath/minkapi/core/podutil"
+	"github.com/elankath/minkapi/core/store"
+	"github.com/elankath/minkapi/core/typeinfo"
+	"github.com/go-logr/logr"
+	jsonpatch "gopkg.in/evanphx/json-patch.v4"
+	corev1 "k8s.io/api/core/v1"
+	eventsv1 "k8s.io/api/events/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	kjson "k8s.io/apimachinery/pkg/util/json"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
+	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/apimachinery/pkg/watch"
+	"k8s.io/client-go/tools/cache"
 )
 
 var _ api.MinKAPIAccess = (*InMemoryKAPI)(nil)
@@ -52,6 +53,30 @@ type InMemoryKAPI struct {
 	kubeConfigTmpl *template.Template
 	server         *http.Server
 	log            logr.Logger
+}
+
+func NewInMemoryMinKAPI(appCtx context.Context, cfg api.MinKAPIConfig, log logr.Logger) (api.MinKAPIAccess, error) {
+	mux := http.NewServeMux()
+	stores := map[schema.GroupVersionKind]*store.InMemResourceStore{}
+	for _, d := range typeinfo.SupportedDescriptors {
+		stores[d.GVK] = store.NewInMemResourceStore(d.GVK, d.ListGVK, d.GVR.GroupResource().Resource, cfg.WatchQueueSize, cfg.WatchTimeout, typeinfo.SupportedScheme, log)
+	}
+	s := &InMemoryKAPI{
+		cfg:    cfg,
+		stores: stores,
+		scheme: typeinfo.SupportedScheme,
+		mux:    mux,
+		server: &http.Server{
+			Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+			Handler: mux,
+			BaseContext: func(_ net.Listener) context.Context {
+				return appCtx
+			},
+		},
+		log: log,
+	}
+	s.registerRoutes()
+	return s, nil
 }
 
 func (k *InMemoryKAPI) CreateObject(gvk schema.GroupVersionKind, obj metav1.Object) (err error) {
@@ -87,14 +112,10 @@ func (k *InMemoryKAPI) CreateObject(gvk schema.GroupVersionKind, obj metav1.Obje
 	return nil
 }
 
-func (k *InMemoryKAPI) DeleteObjects(gvk schema.GroupVersionKind, namespace string, names set.Set[string]) error {
+func (k *InMemoryKAPI) DeleteObjects(gvk schema.GroupVersionKind, c api.MatchCriteria) error {
 	s := k.getStore(gvk)
 	if s == nil {
 		return fmt.Errorf("%w: store not found for gvk %q", api.ErrDeleteObject, gvk)
-	}
-	c := store.MatchCriteria{
-		Namespace: namespace,
-		Names:     names,
 	}
 	return s.DeleteObjects(c)
 }
@@ -103,8 +124,8 @@ func (k *InMemoryKAPI) ListPods(namespace string, matchingPodNames ...string) ([
 	if len(strings.TrimSpace(namespace)) == 0 {
 		return nil, errors.New("cannot list pods without namespace")
 	}
-	podNamesSet := set.New(matchingPodNames...)
-	c := store.MatchCriteria{
+	podNamesSet := sets.New(matchingPodNames...)
+	c := api.MatchCriteria{
 		Namespace: namespace,
 		Names:     podNamesSet,
 	}
@@ -124,23 +145,36 @@ func (k *InMemoryKAPI) ListPods(namespace string, matchingPodNames ...string) ([
 	return pods, nil
 }
 
-func (k *InMemoryKAPI) DeleteObjectsMatchingLabels(gvk schema.GroupVersionKind, namespace string, labels map[string]string) error {
+func (k *InMemoryKAPI) ListNodes(matchingNodeNames ...string) ([]*corev1.Node, error) {
+	// if len(strings.TrimSpace(namespace)) == 0 {
+	// 	return nil, errors.New("cannot list nodes without namespace")
+	// }
+	nodeNamesSet := sets.New(matchingNodeNames...)
+	c := api.MatchCriteria{
+		// Namespace: namespace,
+		Names: nodeNamesSet,
+	}
+	gvk := typeinfo.NodesDescriptor.GVK
 	s := k.getStore(gvk)
 	if s == nil {
-		return fmt.Errorf("%w: store not found for gvk %q", api.ErrDeleteObject, gvk)
+		return nil, fmt.Errorf("%w: store not found for gvk %q", api.ErrListObjects, gvk)
 	}
-	c := store.MatchCriteria{
-		Namespace: namespace,
-		Labels:    labels,
+	objs, err := s.ListMetaObjects(c)
+	if err != nil {
+		return nil, err
 	}
-	return s.DeleteObjects(c)
+	nodes := make([]*corev1.Node, 0, len(objs))
+	for _, obj := range objs {
+		nodes = append(nodes, obj.(*corev1.Node))
+	}
+	return nodes, nil
 }
 
 func (k *InMemoryKAPI) ListEvents(namespace string) ([]*eventsv1.Event, error) {
 	if len(strings.TrimSpace(namespace)) == 0 {
 		return nil, errors.New("cannot list events without namespace")
 	}
-	c := store.MatchCriteria{
+	c := api.MatchCriteria{
 		Namespace: namespace,
 	}
 	gvk := typeinfo.EventsDescriptor.GVK
@@ -157,30 +191,6 @@ func (k *InMemoryKAPI) ListEvents(namespace string) ([]*eventsv1.Event, error) {
 		events = append(events, obj.(*eventsv1.Event))
 	}
 	return events, nil
-}
-
-func NewInMemoryMinKAPI(appCtx context.Context, cfg api.MinKAPIConfig, log logr.Logger) (*InMemoryKAPI, error) {
-	mux := http.NewServeMux()
-	stores := map[schema.GroupVersionKind]*store.InMemResourceStore{}
-	for _, d := range typeinfo.SupportedDescriptors {
-		stores[d.GVK] = store.NewInMemResourceStore(d.GVK, d.ListGVK, d.GVR.GroupResource().Resource, cfg.WatchQueueSize, cfg.WatchTimeout, typeinfo.SupportedScheme, log)
-	}
-	s := &InMemoryKAPI{
-		cfg:    cfg,
-		stores: stores,
-		scheme: typeinfo.SupportedScheme,
-		mux:    mux,
-		server: &http.Server{
-			Addr:    fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-			Handler: mux,
-			BaseContext: func(_ net.Listener) context.Context {
-				return appCtx
-			},
-		},
-		log: log,
-	}
-	s.registerRoutes()
-	return s, nil
 }
 
 func (k *InMemoryKAPI) GetMux() *http.ServeMux {

@@ -1,13 +1,14 @@
 package api
 
 import (
-	"k8s.io/utils/set"
+	"context"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	eventsv1 "k8s.io/api/events/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/sets"
 )
 
 var (
@@ -43,10 +44,42 @@ type MinKAPIConfig struct {
 	// ProfilingEnable indicates whether the minkapi service should register the standard pprof HTTP handlers: /debug/pprof/*
 	ProfilingEnabled bool
 }
+
 type MinKAPIAccess interface {
+	Start() error
+	Shutdown(ctx context.Context) error
 	CreateObject(gvk schema.GroupVersionKind, obj metav1.Object) error
-	DeleteObjects(gvk schema.GroupVersionKind, namespace string, names set.Set[string]) error
+	DeleteObjects(gvk schema.GroupVersionKind, criteria MatchCriteria) error
+	ListNodes(matchingNodeNames ...string) ([]*corev1.Node, error)
 	ListPods(namespace string, matchingPodNames ...string) ([]*corev1.Pod, error)
-	DeleteObjectsMatchingLabels(gvk schema.GroupVersionKind, namespace string, labels map[string]string) error
 	ListEvents(namespace string) ([]*eventsv1.Event, error)
+}
+
+type MatchCriteria struct {
+	Namespace string
+	Names     sets.Set[string]
+	Labels    map[string]string
+}
+
+func (c MatchCriteria) Matches(obj metav1.Object) bool {
+	if c.Namespace != "" && obj.GetNamespace() != c.Namespace {
+		return false
+	}
+	if c.Names != nil && c.Names.Len() > 0 && !c.Names.Has(obj.GetName()) {
+		return false
+	}
+	if c.Labels != nil && len(c.Labels) > 0 && !IsSubset(c.Labels, obj.GetLabels()) {
+		return false
+	}
+	return true
+}
+
+// TODO: think about utilizing stdlib/apimachinery replacements for this
+func IsSubset(subset, superset map[string]string) bool {
+	for k, v := range subset {
+		if val, ok := superset[k]; !ok || val != v {
+			return false
+		}
+	}
+	return true
 }

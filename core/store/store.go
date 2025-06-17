@@ -2,6 +2,11 @@ package store
 
 import (
 	"fmt"
+	"reflect"
+	"strconv"
+	"sync/atomic"
+	"time"
+
 	"github.com/elankath/minkapi/api"
 	"github.com/elankath/minkapi/core/typeinfo"
 	"github.com/go-logr/logr"
@@ -14,11 +19,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/utils/set"
-	"reflect"
-	"strconv"
-	"sync/atomic"
-	"time"
 )
 
 type InMemResourceStore struct {
@@ -210,26 +210,7 @@ func (s *InMemResourceStore) List(namespace string, labelSelector labels.Selecto
 	return listObj, nil
 }
 
-type MatchCriteria struct {
-	Namespace string
-	Names     set.Set[string]
-	Labels    map[string]string
-}
-
-func (c MatchCriteria) Matches(obj metav1.Object) bool {
-	if c.Namespace != "" && obj.GetNamespace() != c.Namespace {
-		return false
-	}
-	if c.Names != nil && c.Names.Len() > 0 && !c.Names.Has(obj.GetName()) {
-		return false
-	}
-	if c.Labels != nil && len(c.Labels) > 0 && !IsSubset(c.Labels, obj.GetLabels()) {
-		return false
-	}
-	return true
-}
-
-func (s *InMemResourceStore) ListMetaObjects(c MatchCriteria) ([]metav1.Object, error) {
+func (s *InMemResourceStore) ListMetaObjects(c api.MatchCriteria) ([]metav1.Object, error) {
 	items := s.delegate.List()
 	objects := make([]metav1.Object, 0, 100)
 	for _, item := range items {
@@ -245,16 +226,7 @@ func (s *InMemResourceStore) ListMetaObjects(c MatchCriteria) ([]metav1.Object, 
 	return objects, nil
 }
 
-func IsSubset(subset, superset map[string]string) bool {
-	for k, v := range subset {
-		if val, ok := superset[k]; !ok || val != v {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *InMemResourceStore) DeleteObjects(c MatchCriteria) error {
+func (s *InMemResourceStore) DeleteObjects(c api.MatchCriteria) error {
 	items := s.delegate.List()
 	for _, item := range items {
 		mo, err := AsMeta(s.log, item)

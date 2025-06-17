@@ -7,9 +7,22 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"github.com/elankath/minkapi/core/typeinfo"
 	"io"
 	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/elankath/minkapi/cli"
+	"github.com/elankath/minkapi/core"
+	"github.com/elankath/minkapi/core/objutil"
+	"github.com/elankath/minkapi/core/typeinfo"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,16 +33,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
-	"log/slog"
-	"os"
-	"path/filepath"
-	"runtime"
 	"sigs.k8s.io/yaml"
-	"strings"
-	"sync"
-	"syscall"
-	"testing"
-	"time"
 )
 
 // TestMain should handle server setup/teardown for the test suite.
@@ -350,6 +354,76 @@ func TestLoadClusterJsons(t *testing.T) {
 	}
 	t.Logf("RSS in Bytes: %d", rss)
 	t.Logf("RSS in Human: %s", bytesToHuman(rss))
+}
+
+func TestInMemObjCreation(t *testing.T) {
+	mainOpts, err := cli.ParseProgramFlags([]string{"-k", "/tmp/minkapi-embed.yaml", "-P", "9876"})
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "Err: %v\n", err)
+		// os.Exit(minkapicli.ExitErrParseOpts)
+		return
+	}
+	log := klog.NewKlogr()
+	svc, err := core.NewInMemoryMinKAPI(context.TODO(), mainOpts.MinKAPIConfig, log)
+	if err != nil {
+		log.Error(err, "failed to start InMemoryKAPI")
+		return
+	}
+
+	go func() {
+		if err := svc.Start(); err != nil {
+			log.Error(err, fmt.Sprintf("minkapi start failed"), err)
+			// os.Exit(cli.ExitErrStart)
+			return
+		}
+	}()
+
+	waitSecs := 2
+	slog.Info("Waiting for minkapi to start", "waitSecs", waitSecs)
+	<-time.After(time.Duration(waitSecs) * time.Second)
+
+	var n1 corev1.Node
+	err = objutil.LoadYamlIntoObj("../specs/node-a.yaml", &n1)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	err = svc.CreateObject(typeinfo.NodesDescriptor.GVK, &n1)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	var p1 corev1.Pod
+	err = objutil.LoadYamlIntoObj("../specs/pod-a.yaml", &p1)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	err = svc.CreateObject(typeinfo.PodsDescriptor.GVK, &p1)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	// List objects
+	nodes, err := svc.ListNodes()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	t.Logf("Nodes are %v", nodes)
+
+	pods, err := svc.ListPods("default")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	t.Logf("Pods are %v", pods)
+
+	<-time.After(1 * time.Minute)
 }
 
 func loadObjects(t *testing.T, baseObjDir string) (objs []*unstructured.Unstructured, err error) {
