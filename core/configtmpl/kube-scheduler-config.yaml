@@ -5,6 +5,7 @@ clientConnection:
   burst: {{.Burst}}
   contentType: application/json
   kubeconfig: {{.KubeConfigPath}}
+enableProfiling: true
 leaderElection:
   leaderElect: false
 profiles:
