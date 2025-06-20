@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/elankath/minkapi/api"
 	"github.com/elankath/minkapi/cli"
 	"github.com/elankath/minkapi/core"
 	"github.com/elankath/minkapi/core/objutil"
@@ -356,11 +357,10 @@ func TestLoadClusterJsons(t *testing.T) {
 	t.Logf("RSS in Human: %s", bytesToHuman(rss))
 }
 
-func TestInMemObjCreation(t *testing.T) {
-	mainOpts, err := cli.ParseProgramFlags([]string{"-k", "/tmp/minkapi-embed.yaml", "-P", "9876"})
+func TestInMemObjMethods(t *testing.T) {
+	mainOpts, err := cli.ParseProgramFlags([]string{"-k", "/tmp/minkapi-test.yaml", "-P", "9892"})
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "Err: %v\n", err)
-		// os.Exit(minkapicli.ExitErrParseOpts)
 		return
 	}
 	log := klog.NewKlogr()
@@ -373,7 +373,6 @@ func TestInMemObjCreation(t *testing.T) {
 	go func() {
 		if err := svc.Start(); err != nil {
 			log.Error(err, fmt.Sprintf("minkapi start failed"), err)
-			// os.Exit(cli.ExitErrStart)
 			return
 		}
 	}()
@@ -382,6 +381,7 @@ func TestInMemObjCreation(t *testing.T) {
 	slog.Info("Waiting for minkapi to start", "waitSecs", waitSecs)
 	<-time.After(time.Duration(waitSecs) * time.Second)
 
+	// Create objects
 	var n1 corev1.Node
 	err = objutil.LoadYamlIntoObj("../specs/node-a.yaml", &n1)
 	if err != nil {
@@ -389,6 +389,7 @@ func TestInMemObjCreation(t *testing.T) {
 		return
 	}
 
+	t.Logf("Creating node")
 	err = svc.CreateObject(typeinfo.NodesDescriptor.GVK, &n1)
 	if err != nil {
 		t.Error(err)
@@ -402,6 +403,7 @@ func TestInMemObjCreation(t *testing.T) {
 		return
 	}
 
+	t.Logf("Creating pod")
 	err = svc.CreateObject(typeinfo.PodsDescriptor.GVK, &p1)
 	if err != nil {
 		t.Error(err)
@@ -414,16 +416,40 @@ func TestInMemObjCreation(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	t.Logf("Nodes are %v", nodes)
+	t.Logf("Node is %v", nodes[0].ObjectMeta.Name)
 
 	pods, err := svc.ListPods("default")
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	t.Logf("Pods are %v", pods)
+	t.Logf("Pod is %v, number of pods is %d", pods[0].ObjectMeta.Name, len(pods))
 
-	<-time.After(1 * time.Minute)
+	t.Logf("Deleting Pod")
+	err = svc.DeleteObjects(typeinfo.PodsDescriptor.GVK, api.MatchCriteria{})
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
+	pods, err = svc.ListPods("default")
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	t.Logf("Number of Pods is %d", len(pods))
+
+	// Check created objects with kubectl
+	// <-time.After(1 * time.Minute)
+	shutDownCtx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	defer cancel()
+
+	// Perform shutdown
+	if err := svc.Shutdown(shutDownCtx); err != nil {
+		t.Error(err, "minkapi shutdown failed")
+		return
+	}
+	log.Info("minkapi shutdown gracefully.")
 }
 
 func loadObjects(t *testing.T, baseObjDir string) (objs []*unstructured.Unstructured, err error) {

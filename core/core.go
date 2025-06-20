@@ -19,6 +19,7 @@ import (
 
 	"github.com/elankath/minkapi/api"
 	"github.com/elankath/minkapi/core/configtmpl"
+	"github.com/elankath/minkapi/core/objutil"
 	"github.com/elankath/minkapi/core/podutil"
 	"github.com/elankath/minkapi/core/store"
 	"github.com/elankath/minkapi/core/typeinfo"
@@ -103,6 +104,8 @@ func (k *InMemoryKAPI) CreateObject(gvk schema.GroupVersionKind, obj metav1.Obje
 	if obj.GetUID() == "" {
 		obj.SetUID(uuid.NewUUID())
 	}
+
+	objutil.SetMetaObjectGVK(obj, gvk)
 
 	err = s.Add(obj)
 	if err != nil {
@@ -698,7 +701,7 @@ func (k *InMemoryKAPI) handleCreatePodBinding(w http.ResponseWriter, r *http.Req
 		k.handleError(w, r, err)
 		return
 	}
-	k.log.V(4).Info("assigned pod to node", "podName", pod.Name, "podNamespace", pod.Namespace, "nodeName", pod.Spec.NodeName)
+	k.log.V(3).Info("assigned pod to node", "podName", pod.Name, "podNamespace", pod.Namespace, "nodeName", pod.Spec.NodeName)
 	// Return {"kind":"Status","apiVersion":"v1","metadata":{},"status":"Success","code":201}
 	statusOK := &metav1.Status{
 		TypeMeta: metav1.TypeMeta{Kind: "Status"},
